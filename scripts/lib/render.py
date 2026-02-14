@@ -21,8 +21,10 @@ def _assess_data_freshness(report: schema.Report) -> dict:
     web_recent = sum(1 for w in report.web if w.date and w.date >= report.range_from)
     hn_recent = sum(1 for h in report.hn if h.date and h.date >= report.range_from)
 
-    total_recent = reddit_recent + x_recent + web_recent + hn_recent
-    total_items = len(report.reddit) + len(report.x) + len(report.web) + len(report.hn)
+    yt_recent = sum(1 for y in report.yt if y.date and y.date >= report.range_from)
+
+    total_recent = reddit_recent + x_recent + web_recent + hn_recent + yt_recent
+    total_items = len(report.reddit) + len(report.x) + len(report.web) + len(report.hn) + len(report.yt)
 
     return {
         "reddit_recent": reddit_recent,
@@ -203,6 +205,38 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
             lines.append(f"  *{item.why_relevant}*")
             lines.append("")
 
+    # YouTube items
+    if report.yt_error:
+        lines.append("### YouTube Videos")
+        lines.append("")
+        lines.append(f"**ERROR:** {report.yt_error}")
+        lines.append("")
+    elif report.yt:
+        lines.append("### YouTube Videos")
+        lines.append("")
+        for item in report.yt[:limit]:
+            eng_str = ""
+            if item.engagement:
+                eng = item.engagement
+                parts = []
+                if eng.views is not None:
+                    parts.append(f"{eng.views}views")
+                if eng.likes is not None:
+                    parts.append(f"{eng.likes}likes")
+                if eng.num_comments is not None:
+                    parts.append(f"{eng.num_comments}cmt")
+                if parts:
+                    eng_str = f" [{', '.join(parts)}]"
+
+            date_str = f" ({item.date})" if item.date else " (date unknown)"
+            conf_str = f" [date:{item.date_confidence}]" if item.date_confidence != "high" else ""
+
+            lines.append(f"**{item.id}** (score:{item.score}) {item.channel}{date_str}{conf_str}{eng_str}")
+            lines.append(f"  {item.title}")
+            lines.append(f"  {item.url}")
+            lines.append(f"  *{item.why_relevant}*")
+            lines.append("")
+
     # Web items (if any - populated by Claude)
     if report.web_error:
         lines.append("### Web Results")
@@ -252,6 +286,8 @@ def render_context_snippet(report: schema.Report) -> str:
         all_items.append((item.score, "X", item.text[:50] + "...", item.url))
     for item in report.hn[:5]:
         all_items.append((item.score, "HN", item.title[:50] + "...", item.hn_url))
+    for item in report.yt[:5]:
+        all_items.append((item.score, "YT", item.title[:50] + "...", item.url))
     for item in report.web[:5]:
         all_items.append((item.score, "Web", item.title[:50] + "...", item.url))
 
@@ -362,6 +398,25 @@ def render_full_report(report: schema.Report) -> str:
 
             lines.append("")
 
+    # YouTube section
+    if report.yt:
+        lines.append("## YouTube Videos")
+        lines.append("")
+        for item in report.yt:
+            lines.append(f"### {item.id}: {item.title}")
+            lines.append("")
+            lines.append(f"- **Channel:** {item.channel}")
+            lines.append(f"- **URL:** {item.url}")
+            lines.append(f"- **Date:** {item.date or 'Unknown'} (confidence: {item.date_confidence})")
+            lines.append(f"- **Score:** {item.score}/100")
+            lines.append(f"- **Relevance:** {item.why_relevant}")
+
+            if item.engagement:
+                eng = item.engagement
+                lines.append(f"- **Engagement:** {eng.views or '?'} views, {eng.likes or '?'} likes")
+
+            lines.append("")
+
     # Web section
     if report.web:
         lines.append("## Web Results")
@@ -398,6 +453,7 @@ def write_outputs(
     raw_xai: Optional[dict] = None,
     raw_reddit_enriched: Optional[list] = None,
     raw_hn: Optional[dict] = None,
+    raw_yt: Optional[dict] = None,
 ):
     """Write all output files.
 
@@ -407,6 +463,7 @@ def write_outputs(
         raw_xai: Raw xAI API response
         raw_reddit_enriched: Raw enriched Reddit thread data
         raw_hn: Raw Hacker News API response
+        raw_yt: Raw YouTube API response
     """
     ensure_output_dir()
 
@@ -438,6 +495,10 @@ def write_outputs(
     if raw_hn:
         with open(OUTPUT_DIR / "raw_hn.json", 'w') as f:
             json.dump(raw_hn, f, indent=2)
+
+    if raw_yt:
+        with open(OUTPUT_DIR / "raw_youtube.json", 'w') as f:
+            json.dump(raw_yt, f, indent=2)
 
 
 def get_context_path() -> str:
