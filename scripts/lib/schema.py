@@ -19,6 +19,11 @@ class Engagement:
     replies: Optional[int] = None
     quotes: Optional[int] = None
 
+    # YouTube fields
+    views: Optional[int] = None
+    # likes is shared with X
+    # num_comments is shared with Reddit
+
     def to_dict(self) -> Dict[str, Any]:
         d = {}
         if self.score is not None:
@@ -35,6 +40,8 @@ class Engagement:
             d['replies'] = self.replies
         if self.quotes is not None:
             d['quotes'] = self.quotes
+        if self.views is not None:
+            d['views'] = self.views
         return d if d else None
 
 
@@ -170,6 +177,37 @@ class WebSearchItem:
 
 
 @dataclass
+class YTItem:
+    """Normalized YouTube item."""
+    id: str
+    title: str
+    url: str
+    channel: str
+    date: Optional[str] = None
+    date_confidence: str = "low"
+    engagement: Optional[Engagement] = None
+    relevance: float = 0.5
+    why_relevant: str = ""
+    subs: SubScores = field(default_factory=SubScores)
+    score: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'title': self.title,
+            'url': self.url,
+            'channel': self.channel,
+            'date': self.date,
+            'date_confidence': self.date_confidence,
+            'engagement': self.engagement.to_dict() if self.engagement else None,
+            'relevance': self.relevance,
+            'why_relevant': self.why_relevant,
+            'subs': self.subs.to_dict(),
+            'score': self.score,
+        }
+
+
+@dataclass
 class Report:
     """Full research report."""
     topic: str
@@ -182,6 +220,7 @@ class Report:
     reddit: List[RedditItem] = field(default_factory=list)
     x: List[XItem] = field(default_factory=list)
     web: List[WebSearchItem] = field(default_factory=list)
+    yt: List[YTItem] = field(default_factory=list)
     best_practices: List[str] = field(default_factory=list)
     prompt_pack: List[str] = field(default_factory=list)
     context_snippet_md: str = ""
@@ -189,6 +228,7 @@ class Report:
     reddit_error: Optional[str] = None
     x_error: Optional[str] = None
     web_error: Optional[str] = None
+    yt_error: Optional[str] = None
     # Cache info
     from_cache: bool = False
     cache_age_hours: Optional[float] = None
@@ -207,6 +247,7 @@ class Report:
             'reddit': [r.to_dict() for r in self.reddit],
             'x': [x.to_dict() for x in self.x],
             'web': [w.to_dict() for w in self.web],
+            'yt': [y.to_dict() for y in self.yt],
             'best_practices': self.best_practices,
             'prompt_pack': self.prompt_pack,
             'context_snippet_md': self.context_snippet_md,
@@ -217,6 +258,8 @@ class Report:
             d['x_error'] = self.x_error
         if self.web_error:
             d['web_error'] = self.web_error
+        if self.yt_error:
+            d['yt_error'] = self.yt_error
         if self.from_cache:
             d['from_cache'] = self.from_cache
         if self.cache_age_hours is not None:
@@ -294,6 +337,27 @@ class Report:
                 score=w.get('score', 0),
             ))
 
+        # Reconstruct YT items
+        yt_items = []
+        for y in data.get('yt', []):
+            eng = None
+            if y.get('engagement'):
+                eng = Engagement(**y['engagement'])
+            subs = SubScores(**y.get('subs', {})) if y.get('subs') else SubScores()
+            yt_items.append(YTItem(
+                id=y['id'],
+                title=y['title'],
+                url=y['url'],
+                channel=y.get('channel', ''),
+                date=y.get('date'),
+                date_confidence=y.get('date_confidence', 'low'),
+                engagement=eng,
+                relevance=y.get('relevance', 0.5),
+                why_relevant=y.get('why_relevant', ''),
+                subs=subs,
+                score=y.get('score', 0),
+            ))
+
         return cls(
             topic=data['topic'],
             range_from=range_from,
@@ -305,12 +369,14 @@ class Report:
             reddit=reddit_items,
             x=x_items,
             web=web_items,
+            yt=yt_items,
             best_practices=data.get('best_practices', []),
             prompt_pack=data.get('prompt_pack', []),
             context_snippet_md=data.get('context_snippet_md', ''),
             reddit_error=data.get('reddit_error'),
             x_error=data.get('x_error'),
             web_error=data.get('web_error'),
+            yt_error=data.get('yt_error'),
             from_cache=data.get('from_cache', False),
             cache_age_hours=data.get('cache_age_hours'),
         )

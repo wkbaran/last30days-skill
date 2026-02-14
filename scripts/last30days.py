@@ -43,6 +43,7 @@ from lib import (
     ui,
     websearch,
     xai_x,
+    youtube,
 )
 
 
@@ -206,6 +207,49 @@ def _search_x(
     return x_items, raw_response, x_error
 
 
+def _search_yt(
+    topic: str,
+    config: dict,
+    from_date: str,
+    to_date: str,
+    depth: str,
+    mock: bool,
+) -> tuple:
+    """Search YouTube via Data API v3 (runs in thread).
+
+    Returns:
+        Tuple of (yt_items, raw_yt, error)
+    """
+    raw_yt = None
+    yt_error = None
+
+    if mock:
+        raw_yt = load_fixture("youtube_sample.json")
+    else:
+        api_key = config.get("YOUTUBE_API_KEY")
+        if not api_key:
+            return [], None, "YOUTUBE_API_KEY not configured"
+        try:
+            raw_yt = youtube.search_youtube(
+                api_key,
+                topic,
+                from_date,
+                to_date,
+                depth=depth,
+            )
+        except http.HTTPError as e:
+            raw_yt = {"error": str(e)}
+            yt_error = f"API error: {e}"
+        except Exception as e:
+            raw_yt = {"error": str(e)}
+            yt_error = f"{type(e).__name__}: {e}"
+
+    # Parse response
+    yt_items = youtube.parse_youtube_response(raw_yt or {})
+
+    return yt_items, raw_yt, yt_error
+
+
 def _run_supplemental(
     topic: str,
     reddit_items: list,
@@ -344,38 +388,45 @@ def run_research(
     """Run the research pipeline.
 
     Returns:
-        Tuple of (reddit_items, x_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error)
+        Tuple of (reddit_items, x_items, yt_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, raw_yt, reddit_error, x_error, yt_error)
 
     Note: web_needed is True when WebSearch should be performed by Claude.
     The script outputs a marker and Claude handles WebSearch in its session.
     """
     reddit_items = []
     x_items = []
+    yt_items = []
     raw_openai = None
     raw_xai = None
+    raw_yt = None
     raw_reddit_enriched = []
     reddit_error = None
     x_error = None
+    yt_error = None
 
     # Check if WebSearch is needed (always needed in web-only mode)
     web_needed = sources in ("all", "web", "reddit-web", "x-web")
+
+    # YouTube runs alongside other sources when API key is available
+    run_yt = bool(config.get("YOUTUBE_API_KEY"))
 
     # Web-only mode: no API calls needed, Claude handles everything
     if sources == "web":
         if progress:
             progress.start_web_only()
             progress.end_web_only()
-        return reddit_items, x_items, True, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error
+        return reddit_items, x_items, yt_items, True, raw_openai, raw_xai, raw_reddit_enriched, raw_yt, reddit_error, x_error, yt_error
 
     # Determine which searches to run
     run_reddit = sources in ("both", "reddit", "all", "reddit-web")
     run_x = sources in ("both", "x", "all", "x-web")
 
-    # Run Reddit and X searches in parallel
+    # Run Reddit, X, and YouTube searches in parallel
     reddit_future = None
     x_future = None
+    yt_future = None
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         # Submit both searches
         if run_reddit:
             if progress:
@@ -391,6 +442,14 @@ def run_research(
             x_future = executor.submit(
                 _search_x, topic, config, selected_models,
                 from_date, to_date, depth, mock, x_source
+            )
+
+        if run_yt:
+            if progress:
+                progress.start_yt()
+            yt_future = executor.submit(
+                _search_yt, topic, config,
+                from_date, to_date, depth, mock
             )
 
         # Collect results
@@ -417,6 +476,18 @@ def run_research(
                     progress.show_error(f"X error: {e}")
             if progress:
                 progress.end_x(len(x_items))
+
+        if yt_future:
+            try:
+                yt_items, raw_yt, yt_error = yt_future.result()
+                if yt_error and progress:
+                    progress.show_error(f"YouTube error: {yt_error}")
+            except Exception as e:
+                yt_error = f"{type(e).__name__}: {e}"
+                if progress:
+                    progress.show_error(f"YouTube error: {e}")
+            if progress:
+                progress.end_yt(len(yt_items))
 
     # Enrich Reddit items with real data (sequential, but with error handling per-item)
     if reddit_items:
@@ -455,7 +526,7 @@ def run_research(
         if sup_x:
             x_items.extend(sup_x)
 
-    return reddit_items, x_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error
+    return reddit_items, x_items, yt_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, raw_yt, reddit_error, x_error, yt_error
 
 
 def main():
@@ -619,7 +690,7 @@ def main():
         mode = sources
 
     # Run research
-    reddit_items, x_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error = run_research(
+    reddit_items, x_items, yt_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, raw_yt, reddit_error, x_error, yt_error = run_research(
         args.topic,
         sources,
         config,
@@ -638,23 +709,28 @@ def main():
     # Normalize items
     normalized_reddit = normalize.normalize_reddit_items(reddit_items, from_date, to_date)
     normalized_x = normalize.normalize_x_items(x_items, from_date, to_date)
+    normalized_yt = normalize.normalize_yt_items(yt_items, from_date, to_date)
 
     # Hard date filter: exclude items with verified dates outside the range
     # This is the safety net - even if prompts let old content through, this filters it
     filtered_reddit = normalize.filter_by_date_range(normalized_reddit, from_date, to_date)
     filtered_x = normalize.filter_by_date_range(normalized_x, from_date, to_date)
+    filtered_yt = normalize.filter_by_date_range(normalized_yt, from_date, to_date)
 
     # Score items
     scored_reddit = score.score_reddit_items(filtered_reddit)
     scored_x = score.score_x_items(filtered_x)
+    scored_yt = score.score_yt_items(filtered_yt)
 
     # Sort items
     sorted_reddit = score.sort_items(scored_reddit)
     sorted_x = score.sort_items(scored_x)
+    sorted_yt = score.sort_items(scored_yt)
 
     # Dedupe items
     deduped_reddit = dedupe.dedupe_reddit(sorted_reddit)
     deduped_x = dedupe.dedupe_x(sorted_x)
+    deduped_yt = dedupe.dedupe_yt(sorted_yt)
 
     # Minimum result guarantee: if all Reddit results were filtered out but
     # we had raw results, keep top 3 by relevance regardless of score
@@ -676,20 +752,22 @@ def main():
     )
     report.reddit = deduped_reddit
     report.x = deduped_x
+    report.yt = deduped_yt
     report.reddit_error = reddit_error
     report.x_error = x_error
+    report.yt_error = yt_error
 
     # Generate context snippet
     report.context_snippet_md = render.render_context_snippet(report)
 
     # Write outputs
-    render.write_outputs(report, raw_openai, raw_xai, raw_reddit_enriched)
+    render.write_outputs(report, raw_openai, raw_xai, raw_reddit_enriched, raw_yt)
 
     # Show completion
     if sources == "web":
         progress.show_web_only_complete()
     else:
-        progress.show_complete(len(deduped_reddit), len(deduped_x))
+        progress.show_complete(len(deduped_reddit), len(deduped_x), yt_count=len(deduped_yt))
 
     # Output result
     output_result(report, args.emit, web_needed, args.topic, from_date, to_date, missing_keys, args.days)

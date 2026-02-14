@@ -278,7 +278,86 @@ def score_websearch_items(items: List[schema.WebSearchItem]) -> List[schema.WebS
     return items
 
 
-def sort_items(items: List[Union[schema.RedditItem, schema.XItem, schema.WebSearchItem]]) -> List:
+def compute_yt_engagement_raw(engagement: Optional[schema.Engagement]) -> Optional[float]:
+    """Compute raw engagement score for YouTube item.
+
+    Formula: 0.40*log1p(views) + 0.40*log1p(likes) + 0.20*log1p(comments)
+    Views are dominant on YouTube but likes signal quality.
+    """
+    if engagement is None:
+        return None
+
+    if engagement.views is None and engagement.likes is None:
+        return None
+
+    views = log1p_safe(engagement.views)
+    likes = log1p_safe(engagement.likes)
+    comments = log1p_safe(engagement.num_comments)
+
+    return 0.40 * views + 0.40 * likes + 0.20 * comments
+
+
+def score_yt_items(items: List[schema.YTItem]) -> List[schema.YTItem]:
+    """Compute scores for YouTube items.
+
+    Args:
+        items: List of YouTube items
+
+    Returns:
+        Items with updated scores
+    """
+    if not items:
+        return items
+
+    # Compute raw engagement scores
+    eng_raw = [compute_yt_engagement_raw(item.engagement) for item in items]
+
+    # Normalize engagement to 0-100
+    eng_normalized = normalize_to_100(eng_raw)
+
+    for i, item in enumerate(items):
+        # Relevance subscore (estimated, convert to 0-100)
+        rel_score = int(item.relevance * 100)
+
+        # Recency subscore
+        rec_score = dates.recency_score(item.date)
+
+        # Engagement subscore
+        if eng_normalized[i] is not None:
+            eng_score = int(eng_normalized[i])
+        else:
+            eng_score = DEFAULT_ENGAGEMENT
+
+        # Store subscores
+        item.subs = schema.SubScores(
+            relevance=rel_score,
+            recency=rec_score,
+            engagement=eng_score,
+        )
+
+        # Compute overall score
+        overall = (
+            WEIGHT_RELEVANCE * rel_score +
+            WEIGHT_RECENCY * rec_score +
+            WEIGHT_ENGAGEMENT * eng_score
+        )
+
+        # Apply penalty for unknown engagement
+        if eng_raw[i] is None:
+            overall -= UNKNOWN_ENGAGEMENT_PENALTY
+
+        # Apply penalty for low date confidence
+        if item.date_confidence == "low":
+            overall -= 5
+        elif item.date_confidence == "med":
+            overall -= 2
+
+        item.score = max(0, min(100, int(overall)))
+
+    return items
+
+
+def sort_items(items: List[Union[schema.RedditItem, schema.XItem, schema.WebSearchItem, schema.YTItem]]) -> List:
     """Sort items by score (descending), then date, then source priority.
 
     Args:
@@ -295,13 +374,15 @@ def sort_items(items: List[Union[schema.RedditItem, schema.XItem, schema.WebSear
         date = item.date or "0000-00-00"
         date_key = -int(date.replace("-", ""))
 
-        # Tertiary: source priority (Reddit > X > WebSearch)
+        # Tertiary: source priority (Reddit > X > YT > WebSearch)
         if isinstance(item, schema.RedditItem):
             source_priority = 0
         elif isinstance(item, schema.XItem):
             source_priority = 1
-        else:  # WebSearchItem
+        elif isinstance(item, schema.YTItem):
             source_priority = 2
+        else:  # WebSearchItem
+            source_priority = 3
 
         # Quaternary: title/text for stability
         text = getattr(item, "title", "") or getattr(item, "text", "")

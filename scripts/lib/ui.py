@@ -56,6 +56,16 @@ X_MESSAGES = [
     "Reading between the posts...",
 ]
 
+YT_MESSAGES = [
+    "Searching YouTube...",
+    "Finding relevant videos...",
+    "Scanning video content...",
+    "Checking view counts...",
+    "Discovering tutorials and talks...",
+    "Browsing channels...",
+    "Looking for tech talks...",
+]
+
 ENRICHING_MESSAGES = [
     "Getting the juicy details...",
     "Fetching engagement metrics...",
@@ -280,6 +290,15 @@ class ProgressDisplay:
         if self.spinner:
             self.spinner.stop(f"{Colors.CYAN}X{Colors.RESET} Found {count} posts")
 
+    def start_yt(self):
+        msg = random.choice(YT_MESSAGES)
+        self.spinner = Spinner(f"{Colors.RED}YT{Colors.RESET} {msg}", Colors.RED)
+        self.spinner.start()
+
+    def end_yt(self, count: int):
+        if self.spinner:
+            self.spinner.stop(f"{Colors.RED}YT{Colors.RESET} Found {count} videos")
+
     def start_processing(self):
         msg = random.choice(PROCESSING_MESSAGES)
         self.spinner = Spinner(f"{Colors.PURPLE}Processing{Colors.RESET} {msg}", Colors.PURPLE)
@@ -289,15 +308,21 @@ class ProgressDisplay:
         if self.spinner:
             self.spinner.stop()
 
-    def show_complete(self, reddit_count: int, x_count: int):
+    def show_complete(self, reddit_count: int, x_count: int, yt_count: int = 0):
         elapsed = time.time() - self.start_time
         if IS_TTY:
             sys.stderr.write(f"\n{Colors.GREEN}{Colors.BOLD}✓ Research complete{Colors.RESET} ")
             sys.stderr.write(f"{Colors.DIM}({elapsed:.1f}s){Colors.RESET}\n")
             sys.stderr.write(f"  {Colors.YELLOW}Reddit:{Colors.RESET} {reddit_count} threads  ")
-            sys.stderr.write(f"{Colors.CYAN}X:{Colors.RESET} {x_count} posts\n\n")
+            sys.stderr.write(f"{Colors.CYAN}X:{Colors.RESET} {x_count} posts")
+            if yt_count:
+                sys.stderr.write(f"  {Colors.RED}YT:{Colors.RESET} {yt_count} videos")
+            sys.stderr.write("\n\n")
         else:
-            sys.stderr.write(f"✓ Research complete ({elapsed:.1f}s) - Reddit: {reddit_count} threads, X: {x_count} posts\n")
+            parts = [f"Reddit: {reddit_count} threads", f"X: {x_count} posts"]
+            if yt_count:
+                parts.append(f"YT: {yt_count} videos")
+            sys.stderr.write(f"✓ Research complete ({elapsed:.1f}s) - {', '.join(parts)}\n")
         sys.stderr.flush()
 
     def show_cached(self, age_hours: float = None):
