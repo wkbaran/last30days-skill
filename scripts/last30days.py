@@ -36,6 +36,7 @@ from lib import (
     models,
     normalize,
     openai_reddit,
+    producthunt,
     reddit_enrich,
     render,
     schema,
@@ -206,6 +207,49 @@ def _search_x(
     return x_items, raw_response, x_error
 
 
+def _search_ph(
+    topic: str,
+    config: dict,
+    from_date: str,
+    to_date: str,
+    depth: str,
+    mock: bool,
+) -> tuple:
+    """Search Product Hunt via API v2 (runs in thread).
+
+    Returns:
+        Tuple of (ph_items, raw_ph, error)
+    """
+    raw_ph = None
+    ph_error = None
+
+    if mock:
+        raw_ph = load_fixture("producthunt_sample.json")
+    else:
+        access_token = config.get("PH_ACCESS_TOKEN")
+        if not access_token:
+            return [], None, "PH_ACCESS_TOKEN not configured"
+        try:
+            raw_ph = producthunt.search_producthunt(
+                access_token,
+                topic,
+                from_date,
+                to_date,
+                depth=depth,
+            )
+        except http.HTTPError as e:
+            raw_ph = {"error": str(e)}
+            ph_error = f"API error: {e}"
+        except Exception as e:
+            raw_ph = {"error": str(e)}
+            ph_error = f"{type(e).__name__}: {e}"
+
+    # Parse response
+    ph_items = producthunt.parse_ph_response(raw_ph or {})
+
+    return ph_items, raw_ph, ph_error
+
+
 def _run_supplemental(
     topic: str,
     reddit_items: list,
@@ -344,38 +388,45 @@ def run_research(
     """Run the research pipeline.
 
     Returns:
-        Tuple of (reddit_items, x_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error)
+        Tuple of (reddit_items, x_items, ph_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, raw_ph, reddit_error, x_error, ph_error)
 
     Note: web_needed is True when WebSearch should be performed by Claude.
     The script outputs a marker and Claude handles WebSearch in its session.
     """
     reddit_items = []
     x_items = []
+    ph_items = []
     raw_openai = None
     raw_xai = None
+    raw_ph = None
     raw_reddit_enriched = []
     reddit_error = None
     x_error = None
+    ph_error = None
 
     # Check if WebSearch is needed (always needed in web-only mode)
     web_needed = sources in ("all", "web", "reddit-web", "x-web")
+
+    # Product Hunt runs alongside other sources when token is available
+    run_ph = bool(config.get("PH_ACCESS_TOKEN"))
 
     # Web-only mode: no API calls needed, Claude handles everything
     if sources == "web":
         if progress:
             progress.start_web_only()
             progress.end_web_only()
-        return reddit_items, x_items, True, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error
+        return reddit_items, x_items, ph_items, True, raw_openai, raw_xai, raw_reddit_enriched, raw_ph, reddit_error, x_error, ph_error
 
     # Determine which searches to run
     run_reddit = sources in ("both", "reddit", "all", "reddit-web")
     run_x = sources in ("both", "x", "all", "x-web")
 
-    # Run Reddit and X searches in parallel
+    # Run Reddit, X, and Product Hunt searches in parallel
     reddit_future = None
     x_future = None
+    ph_future = None
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         # Submit both searches
         if run_reddit:
             if progress:
@@ -391,6 +442,14 @@ def run_research(
             x_future = executor.submit(
                 _search_x, topic, config, selected_models,
                 from_date, to_date, depth, mock, x_source
+            )
+
+        if run_ph:
+            if progress:
+                progress.start_ph()
+            ph_future = executor.submit(
+                _search_ph, topic, config,
+                from_date, to_date, depth, mock
             )
 
         # Collect results
@@ -417,6 +476,18 @@ def run_research(
                     progress.show_error(f"X error: {e}")
             if progress:
                 progress.end_x(len(x_items))
+
+        if ph_future:
+            try:
+                ph_items, raw_ph, ph_error = ph_future.result()
+                if ph_error and progress:
+                    progress.show_error(f"Product Hunt error: {ph_error}")
+            except Exception as e:
+                ph_error = f"{type(e).__name__}: {e}"
+                if progress:
+                    progress.show_error(f"Product Hunt error: {e}")
+            if progress:
+                progress.end_ph(len(ph_items))
 
     # Enrich Reddit items with real data (sequential, but with error handling per-item)
     if reddit_items:
@@ -455,7 +526,7 @@ def run_research(
         if sup_x:
             x_items.extend(sup_x)
 
-    return reddit_items, x_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error
+    return reddit_items, x_items, ph_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, raw_ph, reddit_error, x_error, ph_error
 
 
 def main():
@@ -619,7 +690,7 @@ def main():
         mode = sources
 
     # Run research
-    reddit_items, x_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, reddit_error, x_error = run_research(
+    reddit_items, x_items, ph_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, raw_ph, reddit_error, x_error, ph_error = run_research(
         args.topic,
         sources,
         config,
@@ -638,23 +709,28 @@ def main():
     # Normalize items
     normalized_reddit = normalize.normalize_reddit_items(reddit_items, from_date, to_date)
     normalized_x = normalize.normalize_x_items(x_items, from_date, to_date)
+    normalized_ph = normalize.normalize_ph_items(ph_items, from_date, to_date)
 
     # Hard date filter: exclude items with verified dates outside the range
     # This is the safety net - even if prompts let old content through, this filters it
     filtered_reddit = normalize.filter_by_date_range(normalized_reddit, from_date, to_date)
     filtered_x = normalize.filter_by_date_range(normalized_x, from_date, to_date)
+    filtered_ph = normalize.filter_by_date_range(normalized_ph, from_date, to_date)
 
     # Score items
     scored_reddit = score.score_reddit_items(filtered_reddit)
     scored_x = score.score_x_items(filtered_x)
+    scored_ph = score.score_ph_items(filtered_ph)
 
     # Sort items
     sorted_reddit = score.sort_items(scored_reddit)
     sorted_x = score.sort_items(scored_x)
+    sorted_ph = score.sort_items(scored_ph)
 
     # Dedupe items
     deduped_reddit = dedupe.dedupe_reddit(sorted_reddit)
     deduped_x = dedupe.dedupe_x(sorted_x)
+    deduped_ph = dedupe.dedupe_ph(sorted_ph)
 
     # Minimum result guarantee: if all Reddit results were filtered out but
     # we had raw results, keep top 3 by relevance regardless of score
@@ -676,20 +752,22 @@ def main():
     )
     report.reddit = deduped_reddit
     report.x = deduped_x
+    report.ph = deduped_ph
     report.reddit_error = reddit_error
     report.x_error = x_error
+    report.ph_error = ph_error
 
     # Generate context snippet
     report.context_snippet_md = render.render_context_snippet(report)
 
     # Write outputs
-    render.write_outputs(report, raw_openai, raw_xai, raw_reddit_enriched)
+    render.write_outputs(report, raw_openai, raw_xai, raw_reddit_enriched, raw_ph)
 
     # Show completion
     if sources == "web":
         progress.show_web_only_complete()
     else:
-        progress.show_complete(len(deduped_reddit), len(deduped_x))
+        progress.show_complete(len(deduped_reddit), len(deduped_x), ph_count=len(deduped_ph))
 
     # Output result
     output_result(report, args.emit, web_needed, args.topic, from_date, to_date, missing_keys, args.days)

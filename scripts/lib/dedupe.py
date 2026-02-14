@@ -36,12 +36,14 @@ def jaccard_similarity(set1: Set[str], set2: Set[str]) -> float:
     return intersection / union if union > 0 else 0.0
 
 
-def get_item_text(item: Union[schema.RedditItem, schema.XItem]) -> str:
+def get_item_text(item: Union[schema.RedditItem, schema.XItem, schema.PHItem]) -> str:
     """Get comparable text from an item."""
     if isinstance(item, schema.RedditItem):
         return item.title
+    elif isinstance(item, schema.PHItem):
+        return item.name
     else:
-        return item.text
+        return getattr(item, "title", "") or getattr(item, "text", "")
 
 
 def find_duplicates(
@@ -117,4 +119,12 @@ def dedupe_x(
     threshold: float = 0.7,
 ) -> List[schema.XItem]:
     """Dedupe X items."""
+    return dedupe_items(items, threshold)
+
+
+def dedupe_ph(
+    items: List[schema.PHItem],
+    threshold: float = 0.7,
+) -> List[schema.PHItem]:
+    """Dedupe Product Hunt items."""
     return dedupe_items(items, threshold)

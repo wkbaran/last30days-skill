@@ -4,7 +4,7 @@ from typing import Any, Dict, List, TypeVar, Union
 
 from . import dates, schema
 
-T = TypeVar("T", schema.RedditItem, schema.XItem, schema.WebSearchItem)
+T = TypeVar("T", schema.RedditItem, schema.XItem, schema.WebSearchItem, schema.PHItem)
 
 
 def filter_by_date_range(
@@ -148,6 +148,55 @@ def normalize_x_items(
             date=date_str,
             date_confidence=date_confidence,
             engagement=engagement,
+            relevance=item.get("relevance", 0.5),
+            why_relevant=item.get("why_relevant", ""),
+        ))
+
+    return normalized
+
+
+def normalize_ph_items(
+    items: List[Dict[str, Any]],
+    from_date: str,
+    to_date: str,
+) -> List[schema.PHItem]:
+    """Normalize raw Product Hunt items to schema.
+
+    Args:
+        items: Raw Product Hunt items from API
+        from_date: Start of date range
+        to_date: End of date range
+
+    Returns:
+        List of PHItem objects
+    """
+    normalized = []
+
+    for item in items:
+        # Parse engagement
+        engagement = None
+        eng_raw = item.get("engagement")
+        if isinstance(eng_raw, dict):
+            engagement = schema.Engagement(
+                votes=eng_raw.get("votes"),
+                num_comments=eng_raw.get("comments"),
+            )
+
+        # Determine date confidence
+        date_str = item.get("date")
+        date_confidence = dates.get_date_confidence(date_str, from_date, to_date)
+
+        normalized.append(schema.PHItem(
+            id=item.get("id", ""),
+            name=item.get("name", ""),
+            tagline=item.get("tagline", ""),
+            url=item.get("url", ""),
+            website=item.get("website", ""),
+            date=date_str,
+            date_confidence=date_confidence,
+            engagement=engagement,
+            topics=item.get("topics", []),
+            makers=item.get("makers", []),
             relevance=item.get("relevance", 0.5),
             why_relevant=item.get("why_relevant", ""),
         ))
