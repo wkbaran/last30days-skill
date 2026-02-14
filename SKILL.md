@@ -9,6 +9,37 @@ allowed-tools: Bash, Read, Write, AskUserQuestion, WebSearch
 
 Research ANY topic across Reddit, X, and the web. Surface what people are actually discussing, recommending, and debating right now.
 
+## Help / Usage
+
+If the user's input is `--help`, `-h`, or `help`, display the following and STOP (do not run research):
+
+```
+/last30days <topic> [options]
+
+Research any topic across Reddit, X, and the web. Surface what people
+are actually discussing, recommending, and debating right now.
+
+Options:
+  --search=SOURCES  Comma-separated list of sources to search.
+                    Valid: reddit, x, web, hn, yt, ph
+                    Example: --search reddit,hn,yt
+                    Default: searches all sources with configured API keys
+
+  --days=N          Number of days to look back (1-30, default: 30)
+                    Example: --days 7
+
+  --quick           Faster research with fewer sources per platform
+  --deep            Comprehensive research with more sources per platform
+
+Examples:
+  /last30days Claude Code prompts
+  /last30days best AI video tools --search reddit,hn
+  /last30days NVIDIA news --days 7
+  /last30days web frameworks --deep --search reddit,x,hn,yt
+```
+
+---
+
 ## CRITICAL: Parse User Intent
 
 Before doing anything, parse the user's input for:

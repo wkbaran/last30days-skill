@@ -9,6 +9,9 @@ Options:
     --mock              Use fixtures instead of real API calls
     --emit=MODE         Output mode: compact|json|md|context|path (default: compact)
     --sources=MODE      Source selection: auto|reddit|x|both (default: auto)
+    --search=SOURCES    Comma-separated list of sources to search (e.g. reddit,hn,yt)
+                        Valid sources: reddit, x, web, hn, yt, ph
+                        Overrides --sources and --include-web when specified
     --quick             Faster research with fewer sources (8-12 each)
     --deep              Comprehensive research with more sources (50-70 Reddit, 40-60 X)
     --debug             Enable verbose debug logging
@@ -47,6 +50,43 @@ from lib import (
     xai_x,
     youtube,
 )
+
+
+# Valid source names for --search flag
+VALID_SEARCH_SOURCES = {"reddit", "x", "web", "hn", "yt", "ph"}
+
+
+def parse_search_flag(search_str: str) -> set:
+    """Parse and validate the --search flag value.
+
+    Args:
+        search_str: Comma-separated source names (e.g. "reddit,hn,yt")
+
+    Returns:
+        Set of validated source names
+
+    Raises:
+        SystemExit: If invalid sources are specified
+    """
+    sources = set()
+    for s in search_str.split(","):
+        s = s.strip().lower()
+        if not s:
+            continue
+        if s not in VALID_SEARCH_SOURCES:
+            print(
+                f"Error: Unknown search source '{s}'. "
+                f"Valid sources: {', '.join(sorted(VALID_SEARCH_SOURCES))}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        sources.add(s)
+
+    if not sources:
+        print("Error: --search requires at least one source.", file=sys.stderr)
+        sys.exit(1)
+
+    return sources
 
 
 def load_fixture(name: str) -> dict:
@@ -479,8 +519,13 @@ def run_research(
     mock: bool = False,
     progress: ui.ProgressDisplay = None,
     x_source: str = "xai",
+    search_sources: set = None,
 ) -> tuple:
     """Run the research pipeline.
+
+    Args:
+        search_sources: If provided, overrides source selection. Set of source
+            names like {"reddit", "x", "hn", "yt", "ph", "web"}.
 
     Returns:
         Tuple of (reddit_items, x_items, hn_items, yt_items, ph_items, web_needed, raw_openai, raw_xai, raw_reddit_enriched, raw_hn, raw_yt, raw_ph, reddit_error, x_error, hn_error, yt_error, ph_error)
@@ -505,26 +550,45 @@ def run_research(
     yt_error = None
     ph_error = None
 
-    # Check if WebSearch is needed (always needed in web-only mode)
-    web_needed = sources in ("all", "web", "reddit-web", "x-web")
+    if search_sources is not None:
+        # --search flag overrides all source selection logic
+        run_reddit = "reddit" in search_sources
+        run_x = "x" in search_sources
+        run_hn = "hn" in search_sources
+        run_yt = "yt" in search_sources
+        run_ph = "ph" in search_sources
+        web_needed = "web" in search_sources
 
-    # YouTube runs alongside other sources when API key is available
-    run_yt = bool(config.get("YOUTUBE_API_KEY"))
+        # Web-only via --search (no API sources selected)
+        if search_sources == {"web"}:
+            if progress:
+                progress.start_web_only()
+                progress.end_web_only()
+            return reddit_items, x_items, hn_items, yt_items, ph_items, True, raw_openai, raw_xai, raw_reddit_enriched, raw_hn, raw_yt, raw_ph, reddit_error, x_error, hn_error, yt_error, ph_error
+    else:
+        # Original source selection logic
+        # Check if WebSearch is needed (always needed in web-only mode)
+        web_needed = sources in ("all", "web", "reddit-web", "x-web")
 
-    # Product Hunt runs alongside other sources when token is available
-    run_ph = bool(config.get("PH_ACCESS_TOKEN"))
+        # HN is always available (free, no auth)
+        run_hn = True
 
-    # Web-only mode: no API calls needed, Claude handles everything
-    if sources == "web":
-        if progress:
-            progress.start_web_only()
-            progress.end_web_only()
-        return reddit_items, x_items, hn_items, yt_items, ph_items, True, raw_openai, raw_xai, raw_reddit_enriched, raw_hn, raw_yt, raw_ph, reddit_error, x_error, hn_error, yt_error, ph_error
+        # YouTube runs alongside other sources when API key is available
+        run_yt = bool(config.get("YOUTUBE_API_KEY"))
 
-    # Determine which searches to run
-    run_reddit = sources in ("both", "reddit", "all", "reddit-web")
-    run_x = sources in ("both", "x", "all", "x-web")
-    run_hn = True  # HN is always available (free, no auth)
+        # Product Hunt runs alongside other sources when token is available
+        run_ph = bool(config.get("PH_ACCESS_TOKEN"))
+
+        # Web-only mode: no API calls needed, Claude handles everything
+        if sources == "web":
+            if progress:
+                progress.start_web_only()
+                progress.end_web_only()
+            return reddit_items, x_items, hn_items, yt_items, ph_items, True, raw_openai, raw_xai, raw_reddit_enriched, raw_hn, raw_yt, raw_ph, reddit_error, x_error, hn_error, yt_error, ph_error
+
+        # Determine which searches to run
+        run_reddit = sources in ("both", "reddit", "all", "reddit-web")
+        run_x = sources in ("both", "x", "all", "x-web")
 
     # Run Reddit, X, HN, YouTube, and Product Hunt searches in parallel
     reddit_future = None
@@ -720,6 +784,13 @@ def main():
         help="Include general web search alongside Reddit/X (lower weighted)",
     )
     parser.add_argument(
+        "--search",
+        type=str,
+        default=None,
+        help="Comma-separated list of sources to search (e.g. reddit,hn,yt). "
+             "Valid: reddit, x, web, hn, yt, ph. Overrides --sources and --include-web.",
+    )
+    parser.add_argument(
         "--days",
         type=int,
         default=30,
@@ -753,6 +824,11 @@ def main():
         print("Error: Please provide a topic to research.", file=sys.stderr)
         print("Usage: python3 last30days.py <topic> [options]", file=sys.stderr)
         sys.exit(1)
+
+    # Parse --search flag (overrides --sources and --include-web)
+    search_sources = None
+    if args.search is not None:
+        search_sources = parse_search_flag(args.search)
 
     # Load config
     config = env.get_config()
@@ -819,7 +895,9 @@ def main():
         selected_models = models.get_models(config)
 
     # Determine mode string
-    if sources == "all":
+    if search_sources is not None:
+        mode = "+".join(sorted(search_sources))
+    elif sources == "all":
         mode = "all"  # reddit + x + web
     elif sources == "both":
         mode = "both"  # reddit + x
@@ -848,6 +926,7 @@ def main():
         args.mock,
         progress,
         x_source=x_source or "xai",
+        search_sources=search_sources,
     )
 
     # Processing phase
