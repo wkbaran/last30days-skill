@@ -19,6 +19,9 @@ class Engagement:
     replies: Optional[int] = None
     quotes: Optional[int] = None
 
+    # HN fields
+    points: Optional[int] = None
+
     def to_dict(self) -> Dict[str, Any]:
         d = {}
         if self.score is not None:
@@ -35,6 +38,8 @@ class Engagement:
             d['replies'] = self.replies
         if self.quotes is not None:
             d['quotes'] = self.quotes
+        if self.points is not None:
+            d['points'] = self.points
         return d if d else None
 
 
@@ -170,6 +175,39 @@ class WebSearchItem:
 
 
 @dataclass
+class HNItem:
+    """Normalized Hacker News item."""
+    id: str
+    title: str
+    url: str  # Link URL (external or HN)
+    hn_url: str  # HN discussion URL
+    author: str
+    date: Optional[str] = None
+    date_confidence: str = "low"
+    engagement: Optional[Engagement] = None
+    relevance: float = 0.5
+    why_relevant: str = ""
+    subs: SubScores = field(default_factory=SubScores)
+    score: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'title': self.title,
+            'url': self.url,
+            'hn_url': self.hn_url,
+            'author': self.author,
+            'date': self.date,
+            'date_confidence': self.date_confidence,
+            'engagement': self.engagement.to_dict() if self.engagement else None,
+            'relevance': self.relevance,
+            'why_relevant': self.why_relevant,
+            'subs': self.subs.to_dict(),
+            'score': self.score,
+        }
+
+
+@dataclass
 class Report:
     """Full research report."""
     topic: str
@@ -182,6 +220,7 @@ class Report:
     reddit: List[RedditItem] = field(default_factory=list)
     x: List[XItem] = field(default_factory=list)
     web: List[WebSearchItem] = field(default_factory=list)
+    hn: List[HNItem] = field(default_factory=list)
     best_practices: List[str] = field(default_factory=list)
     prompt_pack: List[str] = field(default_factory=list)
     context_snippet_md: str = ""
@@ -189,6 +228,7 @@ class Report:
     reddit_error: Optional[str] = None
     x_error: Optional[str] = None
     web_error: Optional[str] = None
+    hn_error: Optional[str] = None
     # Cache info
     from_cache: bool = False
     cache_age_hours: Optional[float] = None
@@ -207,6 +247,7 @@ class Report:
             'reddit': [r.to_dict() for r in self.reddit],
             'x': [x.to_dict() for x in self.x],
             'web': [w.to_dict() for w in self.web],
+            'hn': [h.to_dict() for h in self.hn],
             'best_practices': self.best_practices,
             'prompt_pack': self.prompt_pack,
             'context_snippet_md': self.context_snippet_md,
@@ -217,6 +258,8 @@ class Report:
             d['x_error'] = self.x_error
         if self.web_error:
             d['web_error'] = self.web_error
+        if self.hn_error:
+            d['hn_error'] = self.hn_error
         if self.from_cache:
             d['from_cache'] = self.from_cache
         if self.cache_age_hours is not None:
@@ -294,6 +337,28 @@ class Report:
                 score=w.get('score', 0),
             ))
 
+        # Reconstruct HN items
+        hn_items = []
+        for h in data.get('hn', []):
+            eng = None
+            if h.get('engagement'):
+                eng = Engagement(**h['engagement'])
+            subs = SubScores(**h.get('subs', {})) if h.get('subs') else SubScores()
+            hn_items.append(HNItem(
+                id=h['id'],
+                title=h['title'],
+                url=h['url'],
+                hn_url=h.get('hn_url', ''),
+                author=h.get('author', ''),
+                date=h.get('date'),
+                date_confidence=h.get('date_confidence', 'low'),
+                engagement=eng,
+                relevance=h.get('relevance', 0.5),
+                why_relevant=h.get('why_relevant', ''),
+                subs=subs,
+                score=h.get('score', 0),
+            ))
+
         return cls(
             topic=data['topic'],
             range_from=range_from,
@@ -305,12 +370,14 @@ class Report:
             reddit=reddit_items,
             x=x_items,
             web=web_items,
+            hn=hn_items,
             best_practices=data.get('best_practices', []),
             prompt_pack=data.get('prompt_pack', []),
             context_snippet_md=data.get('context_snippet_md', ''),
             reddit_error=data.get('reddit_error'),
             x_error=data.get('x_error'),
             web_error=data.get('web_error'),
+            hn_error=data.get('hn_error'),
             from_cache=data.get('from_cache', False),
             cache_age_hours=data.get('cache_age_hours'),
         )

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, TypeVar, Union
 
 from . import dates, schema
 
-T = TypeVar("T", schema.RedditItem, schema.XItem, schema.WebSearchItem)
+T = TypeVar("T", schema.RedditItem, schema.XItem, schema.WebSearchItem, schema.HNItem)
 
 
 def filter_by_date_range(
@@ -145,6 +145,53 @@ def normalize_x_items(
             text=item.get("text", ""),
             url=item.get("url", ""),
             author_handle=item.get("author_handle", ""),
+            date=date_str,
+            date_confidence=date_confidence,
+            engagement=engagement,
+            relevance=item.get("relevance", 0.5),
+            why_relevant=item.get("why_relevant", ""),
+        ))
+
+    return normalized
+
+
+def normalize_hn_items(
+    items: List[Dict[str, Any]],
+    from_date: str,
+    to_date: str,
+) -> List[schema.HNItem]:
+    """Normalize raw Hacker News items to schema.
+
+    Args:
+        items: Raw HN items from Algolia API
+        from_date: Start of date range
+        to_date: End of date range
+
+    Returns:
+        List of HNItem objects
+    """
+    normalized = []
+
+    for item in items:
+        # Parse engagement
+        engagement = None
+        eng_raw = item.get("engagement")
+        if isinstance(eng_raw, dict):
+            engagement = schema.Engagement(
+                points=eng_raw.get("points"),
+                num_comments=eng_raw.get("num_comments"),
+            )
+
+        # Determine date confidence
+        date_str = item.get("date")
+        date_confidence = dates.get_date_confidence(date_str, from_date, to_date)
+
+        normalized.append(schema.HNItem(
+            id=item.get("id", ""),
+            title=item.get("title", ""),
+            url=item.get("url", ""),
+            hn_url=item.get("hn_url", ""),
+            author=item.get("author", ""),
             date=date_str,
             date_confidence=date_confidence,
             engagement=engagement,

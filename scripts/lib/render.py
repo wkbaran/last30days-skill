@@ -19,9 +19,10 @@ def _assess_data_freshness(report: schema.Report) -> dict:
     reddit_recent = sum(1 for r in report.reddit if r.date and r.date >= report.range_from)
     x_recent = sum(1 for x in report.x if x.date and x.date >= report.range_from)
     web_recent = sum(1 for w in report.web if w.date and w.date >= report.range_from)
+    hn_recent = sum(1 for h in report.hn if h.date and h.date >= report.range_from)
 
-    total_recent = reddit_recent + x_recent + web_recent
-    total_items = len(report.reddit) + len(report.x) + len(report.web)
+    total_recent = reddit_recent + x_recent + web_recent + hn_recent
+    total_items = len(report.reddit) + len(report.x) + len(report.web) + len(report.hn)
 
     return {
         "reddit_recent": reddit_recent,
@@ -170,6 +171,38 @@ def render_compact(report: schema.Report, limit: int = 15, missing_keys: str = "
             lines.append(f"  *{item.why_relevant}*")
             lines.append("")
 
+    # HN items
+    if report.hn_error:
+        lines.append("### Hacker News Stories")
+        lines.append("")
+        lines.append(f"**ERROR:** {report.hn_error}")
+        lines.append("")
+    elif report.hn:
+        lines.append("### Hacker News Stories")
+        lines.append("")
+        for item in report.hn[:limit]:
+            eng_str = ""
+            if item.engagement:
+                eng = item.engagement
+                parts = []
+                if eng.points is not None:
+                    parts.append(f"{eng.points}pts")
+                if eng.num_comments is not None:
+                    parts.append(f"{eng.num_comments}cmt")
+                if parts:
+                    eng_str = f" [{', '.join(parts)}]"
+
+            date_str = f" ({item.date})" if item.date else " (date unknown)"
+            conf_str = f" [date:{item.date_confidence}]" if item.date_confidence != "high" else ""
+
+            lines.append(f"**{item.id}** (score:{item.score}) {item.author}{date_str}{conf_str}{eng_str}")
+            lines.append(f"  {item.title}")
+            lines.append(f"  {item.hn_url}")
+            if item.url != item.hn_url:
+                lines.append(f"  Link: {item.url}")
+            lines.append(f"  *{item.why_relevant}*")
+            lines.append("")
+
     # Web items (if any - populated by Claude)
     if report.web_error:
         lines.append("### Web Results")
@@ -217,6 +250,8 @@ def render_context_snippet(report: schema.Report) -> str:
         all_items.append((item.score, "Reddit", item.title, item.url))
     for item in report.x[:5]:
         all_items.append((item.score, "X", item.text[:50] + "...", item.url))
+    for item in report.hn[:5]:
+        all_items.append((item.score, "HN", item.title[:50] + "...", item.hn_url))
     for item in report.web[:5]:
         all_items.append((item.score, "Web", item.title[:50] + "...", item.url))
 
@@ -306,6 +341,27 @@ def render_full_report(report: schema.Report) -> str:
             lines.append(f"> {item.text}")
             lines.append("")
 
+    # HN section
+    if report.hn:
+        lines.append("## Hacker News Stories")
+        lines.append("")
+        for item in report.hn:
+            lines.append(f"### {item.id}: {item.title}")
+            lines.append("")
+            lines.append(f"- **Author:** {item.author}")
+            lines.append(f"- **HN URL:** {item.hn_url}")
+            if item.url != item.hn_url:
+                lines.append(f"- **Link:** {item.url}")
+            lines.append(f"- **Date:** {item.date or 'Unknown'} (confidence: {item.date_confidence})")
+            lines.append(f"- **Score:** {item.score}/100")
+            lines.append(f"- **Relevance:** {item.why_relevant}")
+
+            if item.engagement:
+                eng = item.engagement
+                lines.append(f"- **Engagement:** {eng.points or '?'} points, {eng.num_comments or '?'} comments")
+
+            lines.append("")
+
     # Web section
     if report.web:
         lines.append("## Web Results")
@@ -341,6 +397,7 @@ def write_outputs(
     raw_openai: Optional[dict] = None,
     raw_xai: Optional[dict] = None,
     raw_reddit_enriched: Optional[list] = None,
+    raw_hn: Optional[dict] = None,
 ):
     """Write all output files.
 
@@ -349,6 +406,7 @@ def write_outputs(
         raw_openai: Raw OpenAI API response
         raw_xai: Raw xAI API response
         raw_reddit_enriched: Raw enriched Reddit thread data
+        raw_hn: Raw Hacker News API response
     """
     ensure_output_dir()
 
@@ -376,6 +434,10 @@ def write_outputs(
     if raw_reddit_enriched:
         with open(OUTPUT_DIR / "raw_reddit_threads_enriched.json", 'w') as f:
             json.dump(raw_reddit_enriched, f, indent=2)
+
+    if raw_hn:
+        with open(OUTPUT_DIR / "raw_hn.json", 'w') as f:
+            json.dump(raw_hn, f, indent=2)
 
 
 def get_context_path() -> str:
