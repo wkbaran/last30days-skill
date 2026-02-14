@@ -95,8 +95,8 @@ class TestSearchSourceOverride(unittest.TestCase):
             progress=progress,
             search_sources=None,
         )
-        # web_needed should be True (index 2)
-        self.assertTrue(result[2])
+        # web_needed should be True (index 5)
+        self.assertTrue(result[5])
 
     def test_search_sources_web_only(self):
         """--search=web should result in web_needed=True and no API items."""
@@ -115,7 +115,7 @@ class TestSearchSourceOverride(unittest.TestCase):
             progress=progress,
             search_sources={"web"},
         )
-        reddit_items, x_items, web_needed = result[0], result[1], result[2]
+        reddit_items, x_items, web_needed = result[0], result[1], result[5]
         self.assertEqual(reddit_items, [])
         self.assertEqual(x_items, [])
         self.assertTrue(web_needed)
@@ -137,7 +137,7 @@ class TestSearchSourceOverride(unittest.TestCase):
             progress=progress,
             search_sources={"reddit"},
         )
-        reddit_items, x_items, web_needed = result[0], result[1], result[2]
+        reddit_items, x_items, web_needed = result[0], result[1], result[5]
         # Reddit should have items (from mock), X should be empty, web not needed
         self.assertGreater(len(reddit_items), 0)
         self.assertEqual(x_items, [])

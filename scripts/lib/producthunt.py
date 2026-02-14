@@ -29,7 +29,25 @@ DEPTH_CONFIG = {
     "deep": 50,
 }
 
-# GraphQL query for searching posts
+# Max topic slugs to query posts for
+MAX_TOPIC_SLUGS = 5
+
+# GraphQL query to find topic slugs matching a search term
+TOPICS_QUERY = """
+query FindTopics($query: String!, $first: Int!) {
+  topics(query: $query, first: $first) {
+    edges {
+      node {
+        slug
+        name
+        postsCount
+      }
+    }
+  }
+}
+"""
+
+# GraphQL query for posts within a topic slug
 POSTS_QUERY = """
 query SearchPosts($topic: String!, $postedAfter: DateTime!, $postedBefore: DateTime!, $first: Int!) {
   posts(
@@ -67,43 +85,15 @@ query SearchPosts($topic: String!, $postedAfter: DateTime!, $postedBefore: DateT
 """
 
 
-def search_producthunt(
-    access_token: str,
-    topic: str,
-    from_date: str,
-    to_date: str,
-    depth: str = "default",
-    mock_response: Optional[Dict] = None,
-) -> Dict[str, Any]:
-    """Search Product Hunt for relevant products.
+def _find_topic_slugs(access_token: str, query: str) -> List[str]:
+    """Find Product Hunt topic slugs matching a search term.
 
-    Args:
-        access_token: Product Hunt API v2 access token
-        topic: Search topic
-        from_date: Start date (YYYY-MM-DD)
-        to_date: End date (YYYY-MM-DD)
-        depth: Research depth - "quick", "default", or "deep"
-        mock_response: Mock response for testing
+    The PH API's posts query filters by topic slug, not free text.
+    This step converts a user's search term into matching topic slugs.
 
     Returns:
-        Raw API response with product data
+        List of topic slugs sorted by postsCount (most active first)
     """
-    if mock_response is not None:
-        return mock_response
-
-    first = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
-
-    # Convert dates to ISO 8601 format for Product Hunt API
-    posted_after = f"{from_date}T00:00:00Z"
-    posted_before = f"{to_date}T23:59:59Z"
-
-    variables = {
-        "topic": topic,
-        "postedAfter": posted_after,
-        "postedBefore": posted_before,
-        "first": first,
-    }
-
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -115,16 +105,125 @@ def search_producthunt(
             PH_API_URL,
             headers=headers,
             json_data={
-                "query": POSTS_QUERY,
-                "variables": variables,
+                "query": TOPICS_QUERY,
+                "variables": {"query": query, "first": MAX_TOPIC_SLUGS},
             },
-            timeout=30,
+            timeout=15,
         )
     except http.HTTPError as e:
-        _log_error(f"Product Hunt API error: {e}")
-        return {"error": str(e)}
+        _log_error(f"Topic search error: {e}")
+        return []
 
-    return response
+    if "errors" in response:
+        for err in response.get("errors", []):
+            _log_error(f"Topic query error: {err.get('message', str(err))}")
+        return []
+
+    edges = response.get("data", {}).get("topics", {}).get("edges", [])
+    # Sort by postsCount descending so we query the most active topics first
+    topics = []
+    for edge in edges:
+        node = edge.get("node", {})
+        if node.get("slug"):
+            topics.append((node["slug"], node.get("postsCount", 0)))
+    topics.sort(key=lambda t: t[1], reverse=True)
+
+    slugs = [t[0] for t in topics]
+    if slugs:
+        _log_info(f"Found topic slugs: {', '.join(slugs)}")
+    else:
+        _log_info(f"No matching topic slugs for '{query}'")
+    return slugs
+
+
+def search_producthunt(
+    access_token: str,
+    topic: str,
+    from_date: str,
+    to_date: str,
+    depth: str = "default",
+    mock_response: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """Search Product Hunt for relevant products.
+
+    Two-step process: first finds topic slugs matching the search term,
+    then queries posts for each matching topic slug within the date range.
+
+    Args:
+        access_token: Product Hunt API v2 access token
+        topic: Search topic (free text)
+        from_date: Start date (YYYY-MM-DD)
+        to_date: End date (YYYY-MM-DD)
+        depth: Research depth - "quick", "default", or "deep"
+        mock_response: Mock response for testing
+
+    Returns:
+        Combined API response with product data from all matching topics
+    """
+    if mock_response is not None:
+        return mock_response
+
+    # Step 1: Find topic slugs matching the search term
+    slugs = _find_topic_slugs(access_token, topic)
+    if not slugs:
+        return {"data": {"posts": {"edges": []}}}
+
+    first = DEPTH_CONFIG.get(depth, DEPTH_CONFIG["default"])
+    posted_after = f"{from_date}T00:00:00Z"
+    posted_before = f"{to_date}T23:59:59Z"
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+
+    # Step 2: Query posts for each topic slug, merge results
+    all_edges = []
+    seen_ids = set()
+
+    for slug in slugs:
+        try:
+            response = http.request(
+                "POST",
+                PH_API_URL,
+                headers=headers,
+                json_data={
+                    "query": POSTS_QUERY,
+                    "variables": {
+                        "topic": slug,
+                        "postedAfter": posted_after,
+                        "postedBefore": posted_before,
+                        "first": first,
+                    },
+                },
+                timeout=30,
+            )
+        except http.HTTPError as e:
+            _log_error(f"Posts query error for topic '{slug}': {e}")
+            continue
+
+        if "errors" in response:
+            for err in response.get("errors", []):
+                _log_error(f"Posts query error: {err.get('message', str(err))}")
+            continue
+
+        edges = response.get("data", {}).get("posts", {}).get("edges", [])
+        for edge in edges:
+            post_id = edge.get("node", {}).get("id")
+            if post_id and post_id not in seen_ids:
+                seen_ids.add(post_id)
+                all_edges.append(edge)
+
+    # Sort merged results by votes descending
+    all_edges.sort(
+        key=lambda e: e.get("node", {}).get("votesCount", 0),
+        reverse=True,
+    )
+
+    # Trim to requested depth
+    all_edges = all_edges[:first]
+
+    return {"data": {"posts": {"edges": all_edges}}}
 
 
 def parse_ph_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
