@@ -25,6 +25,9 @@ class Engagement:
     # YouTube fields
     views: Optional[int] = None
     # likes is shared with X
+
+    # Product Hunt fields
+    votes: Optional[int] = None
     # num_comments is shared with Reddit
 
     def to_dict(self) -> Dict[str, Any]:
@@ -47,6 +50,8 @@ class Engagement:
             d['points'] = self.points
         if self.views is not None:
             d['views'] = self.views
+        if self.votes is not None:
+            d['votes'] = self.votes
         return d if d else None
 
 
@@ -246,6 +251,43 @@ class YTItem:
 
 
 @dataclass
+class PHItem:
+    """Normalized Product Hunt item."""
+    id: str
+    name: str
+    tagline: str
+    url: str
+    website: str
+    date: Optional[str] = None
+    date_confidence: str = "low"
+    engagement: Optional[Engagement] = None
+    topics: List[str] = field(default_factory=list)
+    makers: List[str] = field(default_factory=list)
+    relevance: float = 0.5
+    why_relevant: str = ""
+    subs: SubScores = field(default_factory=SubScores)
+    score: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'name': self.name,
+            'tagline': self.tagline,
+            'url': self.url,
+            'website': self.website,
+            'date': self.date,
+            'date_confidence': self.date_confidence,
+            'engagement': self.engagement.to_dict() if self.engagement else None,
+            'topics': self.topics,
+            'makers': self.makers,
+            'relevance': self.relevance,
+            'why_relevant': self.why_relevant,
+            'subs': self.subs.to_dict(),
+            'score': self.score,
+        }
+
+
+@dataclass
 class Report:
     """Full research report."""
     topic: str
@@ -260,6 +302,7 @@ class Report:
     web: List[WebSearchItem] = field(default_factory=list)
     hn: List[HNItem] = field(default_factory=list)
     yt: List[YTItem] = field(default_factory=list)
+    ph: List[PHItem] = field(default_factory=list)
     best_practices: List[str] = field(default_factory=list)
     prompt_pack: List[str] = field(default_factory=list)
     context_snippet_md: str = ""
@@ -269,6 +312,7 @@ class Report:
     web_error: Optional[str] = None
     hn_error: Optional[str] = None
     yt_error: Optional[str] = None
+    ph_error: Optional[str] = None
     # Cache info
     from_cache: bool = False
     cache_age_hours: Optional[float] = None
@@ -289,6 +333,7 @@ class Report:
             'web': [w.to_dict() for w in self.web],
             'hn': [h.to_dict() for h in self.hn],
             'yt': [y.to_dict() for y in self.yt],
+            'ph': [p.to_dict() for p in self.ph],
             'best_practices': self.best_practices,
             'prompt_pack': self.prompt_pack,
             'context_snippet_md': self.context_snippet_md,
@@ -303,6 +348,8 @@ class Report:
             d['hn_error'] = self.hn_error
         if self.yt_error:
             d['yt_error'] = self.yt_error
+        if self.ph_error:
+            d['ph_error'] = self.ph_error
         if self.from_cache:
             d['from_cache'] = self.from_cache
         if self.cache_age_hours is not None:
@@ -423,6 +470,30 @@ class Report:
                 score=y.get('score', 0),
             ))
 
+        # Reconstruct PH items
+        ph_items = []
+        for p in data.get('ph', []):
+            eng = None
+            if p.get('engagement'):
+                eng = Engagement(**p['engagement'])
+            subs = SubScores(**p.get('subs', {})) if p.get('subs') else SubScores()
+            ph_items.append(PHItem(
+                id=p['id'],
+                name=p['name'],
+                tagline=p.get('tagline', ''),
+                url=p['url'],
+                website=p.get('website', ''),
+                date=p.get('date'),
+                date_confidence=p.get('date_confidence', 'low'),
+                engagement=eng,
+                topics=p.get('topics', []),
+                makers=p.get('makers', []),
+                relevance=p.get('relevance', 0.5),
+                why_relevant=p.get('why_relevant', ''),
+                subs=subs,
+                score=p.get('score', 0),
+            ))
+
         return cls(
             topic=data['topic'],
             range_from=range_from,
@@ -436,6 +507,7 @@ class Report:
             web=web_items,
             hn=hn_items,
             yt=yt_items,
+            ph=ph_items,
             best_practices=data.get('best_practices', []),
             prompt_pack=data.get('prompt_pack', []),
             context_snippet_md=data.get('context_snippet_md', ''),
@@ -444,6 +516,7 @@ class Report:
             web_error=data.get('web_error'),
             hn_error=data.get('hn_error'),
             yt_error=data.get('yt_error'),
+            ph_error=data.get('ph_error'),
             from_cache=data.get('from_cache', False),
             cache_age_hours=data.get('cache_age_hours'),
         )

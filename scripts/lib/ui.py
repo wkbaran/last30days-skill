@@ -76,6 +76,16 @@ YT_MESSAGES = [
     "Looking for tech talks...",
 ]
 
+PH_MESSAGES = [
+    "Browsing Product Hunt launches...",
+    "Checking what's shipping...",
+    "Scanning the latest launches...",
+    "Finding trending products...",
+    "Exploring maker submissions...",
+    "Hunting for new products...",
+    "Checking the launch feed...",
+]
+
 ENRICHING_MESSAGES = [
     "Getting the juicy details...",
     "Fetching engagement metrics...",
@@ -318,6 +328,15 @@ class ProgressDisplay:
         if self.spinner:
             self.spinner.stop(f"{Colors.RED}YT{Colors.RESET} Found {count} videos")
 
+    def start_ph(self):
+        msg = random.choice(PH_MESSAGES)
+        self.spinner = Spinner(f"{Colors.YELLOW}PH{Colors.RESET} {msg}", Colors.YELLOW)
+        self.spinner.start()
+
+    def end_ph(self, count: int):
+        if self.spinner:
+            self.spinner.stop(f"{Colors.YELLOW}PH{Colors.RESET} Found {count} launches")
+
     def start_processing(self):
         msg = random.choice(PROCESSING_MESSAGES)
         self.spinner = Spinner(f"{Colors.PURPLE}Processing{Colors.RESET} {msg}", Colors.PURPLE)
@@ -327,7 +346,7 @@ class ProgressDisplay:
         if self.spinner:
             self.spinner.stop()
 
-    def show_complete(self, reddit_count: int, x_count: int, hn_count: int = 0, yt_count: int = 0):
+    def show_complete(self, reddit_count: int, x_count: int, hn_count: int = 0, yt_count: int = 0, ph_count: int = 0):
         elapsed = time.time() - self.start_time
         if IS_TTY:
             sys.stderr.write(f"\n{Colors.GREEN}{Colors.BOLD}✓ Research complete{Colors.RESET} ")
@@ -338,6 +357,8 @@ class ProgressDisplay:
                 sys.stderr.write(f"  {Colors.YELLOW}HN:{Colors.RESET} {hn_count} stories")
             if yt_count:
                 sys.stderr.write(f"  {Colors.RED}YT:{Colors.RESET} {yt_count} videos")
+            if ph_count:
+                sys.stderr.write(f"  {Colors.YELLOW}PH:{Colors.RESET} {ph_count} launches")
             sys.stderr.write("\n\n")
         else:
             parts = [f"Reddit: {reddit_count} threads", f"X: {x_count} posts"]
@@ -345,6 +366,8 @@ class ProgressDisplay:
                 parts.append(f"HN: {hn_count} stories")
             if yt_count:
                 parts.append(f"YT: {yt_count} videos")
+            if ph_count:
+                parts.append(f"PH: {ph_count} launches")
             sys.stderr.write(f"✓ Research complete ({elapsed:.1f}s) - {', '.join(parts)}\n")
         sys.stderr.flush()
 
