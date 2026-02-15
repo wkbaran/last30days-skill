@@ -1,8 +1,12 @@
 """Product Hunt API v2 (GraphQL) client for product discovery."""
 
+import json
+import os
 import sys
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import http
 
@@ -32,16 +36,31 @@ DEPTH_CONFIG = {
 # Max topic slugs to query posts for
 MAX_TOPIC_SLUGS = 5
 
-# GraphQL query to find topic slugs matching a search term
-TOPICS_QUERY = """
-query FindTopics($query: String!, $first: Int!) {
-  topics(query: $query, first: $first) {
+# Cache settings
+CACHE_MAX_AGE = 86400  # 24 hours in seconds
+_CACHE_DIR_OVERRIDE = os.environ.get('LAST30DAYS_CONFIG_DIR')
+if _CACHE_DIR_OVERRIDE == "":
+    _CACHE_DIR = None
+elif _CACHE_DIR_OVERRIDE:
+    _CACHE_DIR = Path(_CACHE_DIR_OVERRIDE)
+else:
+    _CACHE_DIR = Path.home() / ".config" / "last30days"
+CACHE_FILE = _CACHE_DIR / "ph_topics_cache.json" if _CACHE_DIR else None
+
+# GraphQL query to fetch all topics (paginated)
+ALL_TOPICS_QUERY = """
+query($first: Int!, $after: String) {
+  topics(first: $first, after: $after, order: FOLLOWERS_COUNT) {
     edges {
       node {
         slug
         name
         postsCount
       }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
     }
   }
 }
@@ -85,54 +104,269 @@ query SearchPosts($topic: String!, $postedAfter: DateTime!, $postedBefore: DateT
 """
 
 
-def _find_topic_slugs(access_token: str, query: str) -> List[str]:
-    """Find Product Hunt topic slugs matching a search term.
+# ---------------------------------------------------------------------------
+# Topic cache: fetch all PH topics, cache locally, refresh daily
+# ---------------------------------------------------------------------------
 
-    The PH API's posts query filters by topic slug, not free text.
-    This step converts a user's search term into matching topic slugs.
-
-    Returns:
-        List of topic slugs sorted by postsCount (most active first)
-    """
+def _fetch_all_topics(access_token: str) -> List[Dict[str, Any]]:
+    """Fetch all Product Hunt topics via paginated GraphQL queries."""
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
 
+    all_topics = []
+    cursor = None
+
+    while True:
+        variables = {"first": 50}
+        if cursor:
+            variables["after"] = cursor
+
+        try:
+            response = http.request(
+                "POST",
+                PH_API_URL,
+                headers=headers,
+                json_data={"query": ALL_TOPICS_QUERY, "variables": variables},
+                timeout=30,
+            )
+        except http.HTTPError as e:
+            _log_error(f"Failed to fetch topics: {e}")
+            break
+
+        if "errors" in response:
+            for err in response.get("errors", []):
+                _log_error(f"Topics fetch error: {err.get('message', str(err))}")
+            break
+
+        data = response.get("data", {}).get("topics", {})
+        for edge in data.get("edges", []):
+            node = edge.get("node", {})
+            if node.get("slug"):
+                all_topics.append({
+                    "slug": node["slug"],
+                    "name": node.get("name", ""),
+                    "posts": node.get("postsCount", 0),
+                })
+
+        page_info = data.get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+
+    return all_topics
+
+
+def _load_cache() -> Optional[Dict[str, Any]]:
+    """Load topic cache from disk if it exists and is fresh."""
+    if not CACHE_FILE or not CACHE_FILE.exists():
+        return None
+
     try:
-        response = http.request(
-            "POST",
-            PH_API_URL,
-            headers=headers,
-            json_data={
-                "query": TOPICS_QUERY,
-                "variables": {"query": query, "first": MAX_TOPIC_SLUGS},
-            },
-            timeout=15,
-        )
-    except http.HTTPError as e:
-        _log_error(f"Topic search error: {e}")
+        with open(CACHE_FILE, "r") as f:
+            cache = json.load(f)
+        if time.time() - cache.get("timestamp", 0) < CACHE_MAX_AGE:
+            return cache
+    except (json.JSONDecodeError, OSError, KeyError):
+        pass
+
+    return None
+
+
+def _save_cache(topics: List[Dict[str, Any]]):
+    """Save topic list to disk cache."""
+    if not CACHE_FILE:
+        return
+
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump({"timestamp": time.time(), "topics": topics}, f)
+    except OSError as e:
+        _log_error(f"Failed to write topic cache: {e}")
+
+
+def _get_topics(access_token: str) -> List[Dict[str, Any]]:
+    """Get all PH topics, using cache when fresh."""
+    cache = _load_cache()
+    if cache:
+        return cache["topics"]
+
+    _log_info("Refreshing topic cache...")
+    topics = _fetch_all_topics(access_token)
+    if topics:
+        _save_cache(topics)
+    return topics
+
+
+# ---------------------------------------------------------------------------
+# Local topic matching: map free-text query to relevant topic slugs
+# ---------------------------------------------------------------------------
+
+# Common synonyms/expansions to broaden matching
+_SYNONYMS = {
+    "ai": ["artificial-intelligence"],
+    "ml": ["machine-learning"],
+    "devtools": ["developer-tools"],
+    "dev": ["developer-tools", "software-engineering"],
+    "ux": ["user-experience"],
+    "ui": ["user-experience", "design-tools"],
+    "saas": ["saas"],
+    "api": ["api-1"],
+    "iot": ["internet-of-things"],
+    "vr": ["virtual-reality", "augmented-reality"],
+    "ar": ["augmented-reality"],
+    "crypto": ["cryptocurrency", "web3"],
+    "defi": ["decentralized-finance"],
+    "nft": ["nfts"],
+    "seo": ["seo"],
+    "crm": ["crm"],
+    "hr": ["human-resources"],
+    "pm": ["task-management", "project-management"],
+    "nocode": ["no-code"],
+    "fintech": ["fintech"],
+    "edtech": ["education"],
+    "healthtech": ["health"],
+    "biotech": ["biotech"],
+    "ecommerce": ["e-commerce"],
+    "cli": ["command-line-tools"],
+    "llm": ["artificial-intelligence"],
+    "gpt": ["artificial-intelligence"],
+    "chatbot": ["bots"],
+    "bot": ["bots"],
+    "automation": ["automation"],
+    "video": ["video"],
+    "photo": ["photography"],
+    "music": ["music"],
+    "audio": ["audio", "podcasting"],
+    "podcast": ["podcasting"],
+    "email": ["email"],
+    "chat": ["messaging"],
+    "security": ["privacy", "cybersecurity"],
+    "privacy": ["privacy"],
+    "database": ["databases"],
+    "cloud": ["cloud-computing"],
+    "mobile": ["android", "ios"],
+    "android": ["android"],
+    "ios": ["ios"],
+    "mac": ["mac"],
+    "windows": ["windows"],
+    "linux": ["linux", "open-source"],
+    "opensource": ["open-source"],
+    "budget": ["budgeting"],
+    "finance": ["finance", "personal-finance", "fintech"],
+    "money": ["money", "finance"],
+    "invest": ["investing"],
+    "stock": ["investing"],
+    "travel": ["travel"],
+    "food": ["food-and-drink"],
+    "health": ["health"],
+    "fitness": ["fitness"],
+    "yoga": ["yoga"],
+    "meditation": ["meditation"],
+    "sleep": ["sleep"],
+    "writing": ["writing-tools"],
+    "note": ["note-taking", "notes"],
+    "todo": ["task-management"],
+    "task": ["task-management"],
+    "project": ["project-management"],
+    "calendar": ["calendar"],
+    "spreadsheet": ["spreadsheets"],
+    "presentation": ["presentations"],
+    "code": ["developer-tools", "software-engineering"],
+    "coding": ["developer-tools", "vibe-coding"],
+}
+
+
+def _match_topics(query: str, topics: List[Dict[str, Any]]) -> List[str]:
+    """Match a free-text query to relevant topic slugs.
+
+    Strategy:
+    1. Check synonym table for known abbreviations/terms
+    2. Match query words against topic slugs and names (substring)
+    3. Score by match quality and postsCount, return top matches
+    """
+    query_lower = query.lower().strip()
+    words = query_lower.split()
+
+    # Collect candidates as {slug: score}
+    candidates: Dict[str, float] = {}
+    posts_count: Dict[str, int] = {}
+
+    for t in topics:
+        posts_count[t["slug"]] = t.get("posts", 0)
+
+    # 1) Synonym lookup for each word
+    for word in words:
+        clean = word.strip(".,!?")
+        if clean in _SYNONYMS:
+            for slug in _SYNONYMS[clean]:
+                # Verify slug exists in the topic list
+                if any(t["slug"] == slug for t in topics):
+                    candidates[slug] = candidates.get(slug, 0) + 3.0
+
+    # 2) Substring matching against slug and name
+    for t in topics:
+        slug = t["slug"]
+        name_lower = t["name"].lower()
+        # Tokenize slug: "developer-tools" -> ["developer", "tools"]
+        slug_words = slug.split("-")
+
+        for word in words:
+            clean = word.strip(".,!?")
+            if len(clean) < 2:
+                continue
+
+            # Exact slug word match (strongest)
+            if clean in slug_words:
+                candidates[slug] = candidates.get(slug, 0) + 2.0
+            # Exact name word match
+            elif clean in name_lower.split():
+                candidates[slug] = candidates.get(slug, 0) + 2.0
+            # Substring in slug
+            elif clean in slug:
+                candidates[slug] = candidates.get(slug, 0) + 1.0
+            # Substring in name
+            elif clean in name_lower:
+                candidates[slug] = candidates.get(slug, 0) + 1.0
+            # Slug word starts with query word (prefix match)
+            elif any(sw.startswith(clean) for sw in slug_words):
+                candidates[slug] = candidates.get(slug, 0) + 0.5
+
+    if not candidates:
         return []
 
-    if "errors" in response:
-        for err in response.get("errors", []):
-            _log_error(f"Topic query error: {err.get('message', str(err))}")
+    # Sort by match score (desc), break ties by postsCount (desc)
+    ranked = sorted(
+        candidates.items(),
+        key=lambda item: (item[1], posts_count.get(item[0], 0)),
+        reverse=True,
+    )
+
+    slugs = [slug for slug, _ in ranked[:MAX_TOPIC_SLUGS]]
+    return slugs
+
+
+def _find_topic_slugs(access_token: str, query: str) -> List[str]:
+    """Find Product Hunt topic slugs matching a search term.
+
+    Uses a locally cached topic list with programmatic matching
+    instead of the PH topics API (which has poor multi-word support).
+
+    Returns:
+        List of topic slugs, best matches first
+    """
+    topics = _get_topics(access_token)
+    if not topics:
+        _log_error("No topics available (cache empty, fetch failed)")
         return []
 
-    edges = response.get("data", {}).get("topics", {}).get("edges", [])
-    # Sort by postsCount descending so we query the most active topics first
-    topics = []
-    for edge in edges:
-        node = edge.get("node", {})
-        if node.get("slug"):
-            topics.append((node["slug"], node.get("postsCount", 0)))
-    topics.sort(key=lambda t: t[1], reverse=True)
-
-    slugs = [t[0] for t in topics]
+    slugs = _match_topics(query, topics)
     if slugs:
-        _log_info(f"Found topic slugs: {', '.join(slugs)}")
+        _log_info(f"Matched topics: {', '.join(slugs)}")
     else:
-        _log_info(f"No matching topic slugs for '{query}'")
+        _log_info(f"No matching topics for '{query}'")
     return slugs
 
 
@@ -146,8 +380,8 @@ def search_producthunt(
 ) -> Dict[str, Any]:
     """Search Product Hunt for relevant products.
 
-    Two-step process: first finds topic slugs matching the search term,
-    then queries posts for each matching topic slug within the date range.
+    Two-step process: matches the search term to topic slugs using a
+    locally cached topic list, then queries posts for each matching slug.
 
     Args:
         access_token: Product Hunt API v2 access token
