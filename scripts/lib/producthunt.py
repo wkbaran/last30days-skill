@@ -204,140 +204,139 @@ def _get_topics(access_token: str) -> List[Dict[str, Any]]:
 # Local topic matching: map free-text query to relevant topic slugs
 # ---------------------------------------------------------------------------
 
-# Common synonyms/expansions to broaden matching
-_SYNONYMS = {
-    "ai": ["artificial-intelligence"],
-    "ml": ["machine-learning"],
-    "devtools": ["developer-tools"],
-    "dev": ["developer-tools", "software-engineering"],
-    "ux": ["user-experience"],
-    "ui": ["user-experience", "design-tools"],
-    "saas": ["saas"],
-    "api": ["api-1"],
-    "iot": ["internet-of-things"],
-    "vr": ["virtual-reality", "augmented-reality"],
-    "ar": ["augmented-reality"],
-    "crypto": ["cryptocurrency", "web3"],
-    "defi": ["decentralized-finance"],
-    "nft": ["nfts"],
-    "seo": ["seo"],
-    "crm": ["crm"],
-    "hr": ["human-resources"],
-    "pm": ["task-management", "project-management"],
-    "nocode": ["no-code"],
-    "fintech": ["fintech"],
-    "edtech": ["education"],
-    "healthtech": ["health"],
-    "biotech": ["biotech"],
-    "ecommerce": ["e-commerce"],
-    "cli": ["command-line-tools"],
-    "llm": ["artificial-intelligence"],
-    "gpt": ["artificial-intelligence"],
-    "chatbot": ["bots"],
-    "bot": ["bots"],
-    "automation": ["automation"],
-    "video": ["video"],
-    "photo": ["photography"],
-    "music": ["music"],
-    "audio": ["audio", "podcasting"],
-    "podcast": ["podcasting"],
-    "email": ["email"],
-    "chat": ["messaging"],
-    "security": ["privacy", "cybersecurity"],
-    "privacy": ["privacy"],
-    "database": ["databases"],
-    "cloud": ["cloud-computing"],
-    "mobile": ["android", "ios"],
-    "android": ["android"],
-    "ios": ["ios"],
-    "mac": ["mac"],
-    "windows": ["windows"],
-    "linux": ["linux", "open-source"],
-    "opensource": ["open-source"],
-    "budget": ["budgeting"],
-    "finance": ["finance", "personal-finance", "fintech"],
-    "money": ["money", "finance"],
-    "invest": ["investing"],
-    "stock": ["investing"],
-    "travel": ["travel"],
-    "food": ["food-and-drink"],
-    "health": ["health"],
-    "fitness": ["fitness"],
-    "yoga": ["yoga"],
-    "meditation": ["meditation"],
-    "sleep": ["sleep"],
-    "writing": ["writing-tools"],
-    "note": ["note-taking", "notes"],
-    "todo": ["task-management"],
-    "task": ["task-management"],
-    "project": ["project-management"],
-    "calendar": ["calendar"],
-    "spreadsheet": ["spreadsheets"],
-    "presentation": ["presentations"],
-    "code": ["developer-tools", "software-engineering"],
-    "coding": ["developer-tools", "vibe-coding"],
+# Expand abbreviations/shorthand in the query before matching.
+# Keys are patterns found in user queries; values are what they mean
+# in PH topic vocabulary. Applied as whole-word replacements.
+_EXPANSIONS = {
+    "ai": "artificial intelligence",
+    "ml": "machine learning",
+    "ux": "user experience",
+    "ui": "user interface",
+    "iot": "internet of things",
+    "vr": "virtual reality",
+    "ar": "augmented reality",
+    "crypto": "cryptocurrency",
+    "defi": "decentralized finance",
+    "nft": "nfts",
+    "seo": "seo",
+    "crm": "crm",
+    "hr": "human resources",
+    "nocode": "no code",
+    "no-code": "no code",
+    "devtools": "developer tools",
+    "fintech": "fintech",
+    "edtech": "education technology",
+    "healthtech": "health technology",
+    "ecommerce": "e-commerce",
+    "e-commerce": "e-commerce",
+    "cli": "command line tools",
+    "llm": "artificial intelligence",
+    "gpt": "artificial intelligence",
+    "opensource": "open source",
+    "open-source": "open source",
+    "saas": "saas",
+    "api": "api",
 }
+
+# Multi-word expansions applied to the full query string.
+# Checked before single-word expansions so "machine learning" isn't
+# split into individual word lookups.
+_PHRASE_EXPANSIONS = {
+    "machine learning": "artificial intelligence",
+    "deep learning": "artificial intelligence",
+    "social media": "social media",
+    "growth hacking": "growth hacking",
+}
+
+
+def _expand_query(query: str) -> str:
+    """Expand abbreviations in the query to match PH topic names."""
+    result = query.lower()
+
+    # Apply multi-word phrase expansions first
+    for phrase, expansion in _PHRASE_EXPANSIONS.items():
+        result = result.replace(phrase, expansion)
+
+    # Apply single-word expansions
+    words = result.split()
+    expanded = []
+    for w in words:
+        clean = w.strip(".,!?")
+        if clean in _EXPANSIONS:
+            expanded.append(_EXPANSIONS[clean])
+        else:
+            expanded.append(clean)
+    return " ".join(expanded)
+
+
+def _phrase_match_score(phrase_words: List[str], query_words: List[str]) -> float:
+    """Check if phrase words appear in query words, return match score.
+
+    Matches whole words only. Consecutive matches (phrase appears intact)
+    score higher than scattered matches. Returns 0 for no match.
+    """
+    if not phrase_words:
+        return 0
+
+    phrase_len = len(phrase_words)
+
+    # Check for consecutive (exact phrase) match first
+    for i in range(len(query_words) - phrase_len + 1):
+        if query_words[i:i + phrase_len] == phrase_words:
+            # Exact phrase match - score by phrase length (longer = better)
+            return phrase_len * 2.0
+
+    # Check if all words appear (non-consecutive)
+    if all(w in query_words for w in phrase_words):
+        return phrase_len * 1.0
+
+    # Single-word topics: require exact word match in query
+    if phrase_len == 1 and phrase_words[0] in query_words:
+        return 1.0
+
+    return 0
 
 
 def _match_topics(query: str, topics: List[Dict[str, Any]]) -> List[str]:
     """Match a free-text query to relevant topic slugs.
 
-    Strategy:
-    1. Check synonym table for known abbreviations/terms
-    2. Match query words against topic slugs and names (substring)
-    3. Score by match quality and postsCount, return top matches
-    """
-    query_lower = query.lower().strip()
-    words = query_lower.split()
+    Reversed matching: checks if each topic's name appears within the
+    query string, rather than splitting the query into words. This avoids
+    false positives from individual word matches (e.g. "tools" matching
+    "design-tools" when the query is about video).
 
-    # Collect candidates as {slug: score}
+    Strategy:
+    1. Expand abbreviations in query (ai -> artificial intelligence)
+    2. For each topic, check if its name appears in the expanded query
+    3. Score by match length and postsCount, return top matches
+    """
+    expanded = _expand_query(query)
+
     candidates: Dict[str, float] = {}
     posts_count: Dict[str, int] = {}
 
     for t in topics:
         posts_count[t["slug"]] = t.get("posts", 0)
 
-    # 1) Synonym lookup for each word
-    for word in words:
-        clean = word.strip(".,!?")
-        if clean in _SYNONYMS:
-            for slug in _SYNONYMS[clean]:
-                # Verify slug exists in the topic list
-                if any(t["slug"] == slug for t in topics):
-                    candidates[slug] = candidates.get(slug, 0) + 3.0
+    # Tokenize expanded query for word-boundary matching
+    query_words = expanded.split()
 
-    # 2) Substring matching against slug and name
     for t in topics:
         slug = t["slug"]
         name_lower = t["name"].lower()
-        # Tokenize slug: "developer-tools" -> ["developer", "tools"]
-        slug_words = slug.split("-")
+        # Normalize hyphens to spaces so "No-Code" matches "no code"
+        name_normalized = name_lower.replace("-", " ")
+        name_words = name_normalized.split()
 
-        for word in words:
-            clean = word.strip(".,!?")
-            if len(clean) < 2:
-                continue
-
-            # Exact slug word match (strongest)
-            if clean in slug_words:
-                candidates[slug] = candidates.get(slug, 0) + 2.0
-            # Exact name word match
-            elif clean in name_lower.split():
-                candidates[slug] = candidates.get(slug, 0) + 2.0
-            # Substring in slug
-            elif clean in slug:
-                candidates[slug] = candidates.get(slug, 0) + 1.0
-            # Substring in name
-            elif clean in name_lower:
-                candidates[slug] = candidates.get(slug, 0) + 1.0
-            # Slug word starts with query word (prefix match)
-            elif any(sw.startswith(clean) for sw in slug_words):
-                candidates[slug] = candidates.get(slug, 0) + 0.5
+        # Check if all words of the topic name appear in the query
+        score = _phrase_match_score(name_words, query_words)
+        if score > 0:
+            candidates[slug] = score
 
     if not candidates:
         return []
 
-    # Sort by match score (desc), break ties by postsCount (desc)
+    # Sort by match length (desc), break ties by postsCount (desc)
     ranked = sorted(
         candidates.items(),
         key=lambda item: (item[1], posts_count.get(item[0], 0)),
