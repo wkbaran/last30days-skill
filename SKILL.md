@@ -126,9 +126,14 @@ The script will automatically:
 
 ## STEP 2: DO WEBSEARCH WHILE SCRIPT RUNS
 
+**IMPORTANT:** If the user specified `--search=SOURCES` and did NOT include `web` in the list, SKIP this step entirely. Only do WebSearch when:
+- The user explicitly included `web` in `--search` (e.g. `--search reddit,web`)
+- The user did NOT use `--search` at all (default behavior)
+- The script output contains "### WEBSEARCH REQUIRED ###"
+
 The script auto-detects sources (Bird CLI, API keys, etc). While waiting for it, do WebSearch.
 
-For **ALL modes**, do WebSearch to supplement (or provide all data in web-only mode).
+For **ALL default modes** (when `--search` is not specified), do WebSearch to supplement (or provide all data in web-only mode).
 
 Choose search queries based on QUERY_TYPE:
 
