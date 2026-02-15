@@ -89,7 +89,30 @@ This text MUST appear before you call any tools. It confirms to the user that yo
 
 ## Research Execution
 
-**Step 1: Run the research script**
+**Step 1a: Select Product Hunt topic slugs (if PH is enabled)**
+
+If the user's search includes Product Hunt (either via `--search ph,...` or auto-detected from PH_ACCESS_TOKEN), you must select relevant topic slugs BEFORE running the script.
+
+Product Hunt's API requires specific topic slugs (like "artificial-intelligence", "developer-tools") — it does not support free-text search. You are the intelligence layer that maps the user's topic to the right slugs.
+
+1. Get the full topic list:
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/last30days}/scripts/last30days.py" --list-ph-topics 2>/dev/null
+```
+
+2. From that list, pick the 1-5 most relevant slugs for the user's TOPIC. Use your judgment — for example:
+   - "AI video tools" → `artificial-intelligence`, `video`, `developer-tools`
+   - "productivity apps" → `productivity`, `task-management`
+   - "crypto news" → `cryptocurrency`, `web3`, `blockchain`
+
+3. Pass the selected slugs via `--ph-slugs=slug1,slug2,...`
+
+**Step 1b: Run the research script**
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/last30days}/scripts/last30days.py" "$ARGUMENTS" --ph-slugs=slug1,slug2,slug3 --emit=compact 2>&1
+```
+
+If PH is not enabled, omit `--ph-slugs` and run as normal:
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/last30days}/scripts/last30days.py" "$ARGUMENTS" --emit=compact 2>&1
 ```
@@ -283,12 +306,15 @@ KEY PATTERNS from the research:
 ✅ All agents reported back!
 ├─ 🟠 Reddit: {N} threads │ {N} upvotes │ {N} comments
 ├─ 🔵 X: {N} posts │ {N} likes │ {N} reposts (via Bird/xAI)
+├─ 🟡 Hacker News: {N} stories │ {N} points │ {N} comments
+├─ 🔴 YouTube: {N} videos │ {N} views │ {N} comments
+├─ 🟣 Product Hunt: {N} products │ {N} upvotes │ {N} comments
 ├─ 🌐 Web: {N} pages (supplementary)
 └─ 🗣️ Top voices: @{handle1} ({N} likes), @{handle2} │ r/{sub1}, r/{sub2}
 ---
 ```
 
-If Reddit returned 0 threads, write: "├─ 🟠 Reddit: 0 threads (no results this cycle)"
+Only include lines for sources that were actually searched. If a source returned 0 results, write e.g.: "├─ 🟠 Reddit: 0 threads (no results this cycle)"
 NEVER use plain text dashes (-) or pipe (|). ALWAYS use ├─ └─ │ and the emoji.
 
 **SELF-CHECK before displaying**: Re-read your "What I learned" section. Does it match what the research ACTUALLY says? If you catch yourself projecting your own knowledge instead of the research, rewrite it.

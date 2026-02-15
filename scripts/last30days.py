@@ -349,8 +349,13 @@ def _search_ph(
     to_date: str,
     depth: str,
     mock: bool,
+    ph_slugs: list = None,
 ) -> tuple:
     """Search Product Hunt via API v2 (runs in thread).
+
+    Args:
+        ph_slugs: Pre-selected topic slugs. If None, skips PH search
+                  (caller should pass slugs via --ph-slugs).
 
     Returns:
         Tuple of (ph_items, raw_ph, error)
@@ -364,10 +369,13 @@ def _search_ph(
         access_token = config.get("PH_ACCESS_TOKEN")
         if not access_token:
             return [], None, "PH_ACCESS_TOKEN not configured"
+        slugs = ph_slugs or []
+        if not slugs:
+            return [], None, "No --ph-slugs provided"
         try:
             raw_ph = producthunt.search_producthunt(
                 access_token,
-                topic,
+                slugs,
                 from_date,
                 to_date,
                 depth=depth,
@@ -520,6 +528,7 @@ def run_research(
     progress: ui.ProgressDisplay = None,
     x_source: str = "xai",
     search_sources: set = None,
+    ph_slugs: list = None,
 ) -> tuple:
     """Run the research pipeline.
 
@@ -636,7 +645,7 @@ def run_research(
                 progress.start_ph()
             ph_future = executor.submit(
                 _search_ph, topic, config,
-                from_date, to_date, depth, mock
+                from_date, to_date, depth, mock, ph_slugs
             )
 
         # Collect results
@@ -798,8 +807,29 @@ def main():
         metavar="N",
         help="Number of days to look back (1-30, default: 30)",
     )
+    parser.add_argument(
+        "--ph-slugs",
+        type=str,
+        default=None,
+        help="Comma-separated Product Hunt topic slugs to search (e.g. artificial-intelligence,video)",
+    )
+    parser.add_argument(
+        "--list-ph-topics",
+        action="store_true",
+        help="List available Product Hunt topic slugs and exit",
+    )
 
     args = parser.parse_args()
+
+    # Handle --list-ph-topics early exit
+    if args.list_ph_topics:
+        config = env.get_config()
+        access_token = config.get("PH_ACCESS_TOKEN")
+        if not access_token:
+            print("Error: PH_ACCESS_TOKEN not configured", file=sys.stderr)
+            sys.exit(1)
+        print(producthunt.list_topic_slugs(access_token))
+        sys.exit(0)
 
     # Enable debug logging if requested
     if args.debug:
@@ -818,6 +848,11 @@ def main():
         depth = "deep"
     else:
         depth = "default"
+
+    # Parse --ph-slugs
+    ph_slugs = None
+    if args.ph_slugs:
+        ph_slugs = [s.strip() for s in args.ph_slugs.split(",") if s.strip()]
 
     # Validate topic first (matches original NUX)
     if not args.topic:
@@ -927,6 +962,7 @@ def main():
         progress,
         x_source=x_source or "xai",
         search_sources=search_sources,
+        ph_slugs=ph_slugs,
     )
 
     # Processing phase

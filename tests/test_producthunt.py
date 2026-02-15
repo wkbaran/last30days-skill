@@ -104,7 +104,7 @@ class TestPHHelpers(unittest.TestCase):
     def test_mock_response_passthrough(self):
         mock = {"data": {"posts": {"edges": []}}}
         result = producthunt.search_producthunt(
-            "token", "topic", "2026-01-01", "2026-02-01", mock_response=mock
+            "token", ["test-slug"], "2026-01-01", "2026-02-01", mock_response=mock
         )
         self.assertEqual(result, mock)
 

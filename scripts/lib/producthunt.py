@@ -6,7 +6,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from . import http
 
@@ -32,9 +32,6 @@ DEPTH_CONFIG = {
     "default": 20,
     "deep": 50,
 }
-
-# Max topic slugs to query posts for
-MAX_TOPIC_SLUGS = 5
 
 # Cache settings
 CACHE_MAX_AGE = 86400  # 24 hours in seconds
@@ -187,7 +184,7 @@ def _save_cache(topics: List[Dict[str, Any]]):
         _log_error(f"Failed to write topic cache: {e}")
 
 
-def _get_topics(access_token: str) -> List[Dict[str, Any]]:
+def get_topics(access_token: str) -> List[Dict[str, Any]]:
     """Get all PH topics, using cache when fresh."""
     cache = _load_cache()
     if cache:
@@ -200,191 +197,29 @@ def _get_topics(access_token: str) -> List[Dict[str, Any]]:
     return topics
 
 
+def list_topic_slugs(access_token: str) -> str:
+    """Return all topic slugs as a newline-separated string for display."""
+    topics = get_topics(access_token)
+    return "\n".join(t["slug"] for t in topics)
+
+
 # ---------------------------------------------------------------------------
-# Local topic matching: map free-text query to relevant topic slugs
+# Post search
 # ---------------------------------------------------------------------------
-
-# Expand abbreviations/shorthand in the query before matching.
-# Keys are patterns found in user queries; values are what they mean
-# in PH topic vocabulary. Applied as whole-word replacements.
-_EXPANSIONS = {
-    "ai": "artificial intelligence",
-    "ml": "machine learning",
-    "ux": "user experience",
-    "ui": "user interface",
-    "iot": "internet of things",
-    "vr": "virtual reality",
-    "ar": "augmented reality",
-    "crypto": "cryptocurrency",
-    "defi": "decentralized finance",
-    "nft": "nfts",
-    "seo": "seo",
-    "crm": "crm",
-    "hr": "human resources",
-    "nocode": "no code",
-    "no-code": "no code",
-    "devtools": "developer tools",
-    "fintech": "fintech",
-    "edtech": "education technology",
-    "healthtech": "health technology",
-    "ecommerce": "e-commerce",
-    "e-commerce": "e-commerce",
-    "cli": "command line tools",
-    "llm": "artificial intelligence",
-    "gpt": "artificial intelligence",
-    "opensource": "open source",
-    "open-source": "open source",
-    "saas": "saas",
-    "api": "api",
-}
-
-# Multi-word expansions applied to the full query string.
-# Checked before single-word expansions so "machine learning" isn't
-# split into individual word lookups.
-_PHRASE_EXPANSIONS = {
-    "machine learning": "artificial intelligence",
-    "deep learning": "artificial intelligence",
-    "social media": "social media",
-    "growth hacking": "growth hacking",
-}
-
-
-def _expand_query(query: str) -> str:
-    """Expand abbreviations in the query to match PH topic names."""
-    result = query.lower()
-
-    # Apply multi-word phrase expansions first
-    for phrase, expansion in _PHRASE_EXPANSIONS.items():
-        result = result.replace(phrase, expansion)
-
-    # Apply single-word expansions
-    words = result.split()
-    expanded = []
-    for w in words:
-        clean = w.strip(".,!?")
-        if clean in _EXPANSIONS:
-            expanded.append(_EXPANSIONS[clean])
-        else:
-            expanded.append(clean)
-    return " ".join(expanded)
-
-
-def _phrase_match_score(phrase_words: List[str], query_words: List[str]) -> float:
-    """Check if phrase words appear in query words, return match score.
-
-    Matches whole words only. Consecutive matches (phrase appears intact)
-    score higher than scattered matches. Returns 0 for no match.
-    """
-    if not phrase_words:
-        return 0
-
-    phrase_len = len(phrase_words)
-
-    # Check for consecutive (exact phrase) match first
-    for i in range(len(query_words) - phrase_len + 1):
-        if query_words[i:i + phrase_len] == phrase_words:
-            # Exact phrase match - score by phrase length (longer = better)
-            return phrase_len * 2.0
-
-    # Check if all words appear (non-consecutive)
-    if all(w in query_words for w in phrase_words):
-        return phrase_len * 1.0
-
-    # Single-word topics: require exact word match in query
-    if phrase_len == 1 and phrase_words[0] in query_words:
-        return 1.0
-
-    return 0
-
-
-def _match_topics(query: str, topics: List[Dict[str, Any]]) -> List[str]:
-    """Match a free-text query to relevant topic slugs.
-
-    Reversed matching: checks if each topic's name appears within the
-    query string, rather than splitting the query into words. This avoids
-    false positives from individual word matches (e.g. "tools" matching
-    "design-tools" when the query is about video).
-
-    Strategy:
-    1. Expand abbreviations in query (ai -> artificial intelligence)
-    2. For each topic, check if its name appears in the expanded query
-    3. Score by match length and postsCount, return top matches
-    """
-    expanded = _expand_query(query)
-
-    candidates: Dict[str, float] = {}
-    posts_count: Dict[str, int] = {}
-
-    for t in topics:
-        posts_count[t["slug"]] = t.get("posts", 0)
-
-    # Tokenize expanded query for word-boundary matching
-    query_words = expanded.split()
-
-    for t in topics:
-        slug = t["slug"]
-        name_lower = t["name"].lower()
-        # Normalize hyphens to spaces so "No-Code" matches "no code"
-        name_normalized = name_lower.replace("-", " ")
-        name_words = name_normalized.split()
-
-        # Check if all words of the topic name appear in the query
-        score = _phrase_match_score(name_words, query_words)
-        if score > 0:
-            candidates[slug] = score
-
-    if not candidates:
-        return []
-
-    # Sort by match length (desc), break ties by postsCount (desc)
-    ranked = sorted(
-        candidates.items(),
-        key=lambda item: (item[1], posts_count.get(item[0], 0)),
-        reverse=True,
-    )
-
-    slugs = [slug for slug, _ in ranked[:MAX_TOPIC_SLUGS]]
-    return slugs
-
-
-def _find_topic_slugs(access_token: str, query: str) -> List[str]:
-    """Find Product Hunt topic slugs matching a search term.
-
-    Uses a locally cached topic list with programmatic matching
-    instead of the PH topics API (which has poor multi-word support).
-
-    Returns:
-        List of topic slugs, best matches first
-    """
-    topics = _get_topics(access_token)
-    if not topics:
-        _log_error("No topics available (cache empty, fetch failed)")
-        return []
-
-    slugs = _match_topics(query, topics)
-    if slugs:
-        _log_info(f"Matched topics: {', '.join(slugs)}")
-    else:
-        _log_info(f"No matching topics for '{query}'")
-    return slugs
-
 
 def search_producthunt(
     access_token: str,
-    topic: str,
+    slugs: List[str],
     from_date: str,
     to_date: str,
     depth: str = "default",
     mock_response: Optional[Dict] = None,
 ) -> Dict[str, Any]:
-    """Search Product Hunt for relevant products.
-
-    Two-step process: matches the search term to topic slugs using a
-    locally cached topic list, then queries posts for each matching slug.
+    """Search Product Hunt for products in the given topic slugs.
 
     Args:
         access_token: Product Hunt API v2 access token
-        topic: Search topic (free text)
+        slugs: Topic slugs to query (pre-selected by the caller)
         from_date: Start date (YYYY-MM-DD)
         to_date: End date (YYYY-MM-DD)
         depth: Research depth - "quick", "default", or "deep"
@@ -396,8 +231,6 @@ def search_producthunt(
     if mock_response is not None:
         return mock_response
 
-    # Step 1: Find topic slugs matching the search term
-    slugs = _find_topic_slugs(access_token, topic)
     if not slugs:
         return {"data": {"posts": {"edges": []}}}
 
@@ -410,11 +243,11 @@ def search_producthunt(
         "Content-Type": "application/json",
     }
 
-    # Step 2: Query posts for each topic slug, merge results
     all_edges = []
     seen_ids = set()
 
     for slug in slugs:
+        _log_info(f"Querying topic: {slug}")
         try:
             response = http.request(
                 "POST",
